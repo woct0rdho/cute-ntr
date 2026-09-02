@@ -19,8 +19,10 @@ from cutlass.cute._fi_ext import Pointer, ReductionOp, TensorSSA  # noqa: F401
 class CopyG2SOp:
     """cute.nvgpu.cpasync.CopyG2SOp — 16B cp.async global->shared."""
 
-    def __init__(self):
+    def __init__(self, cache_mode=None, **kwargs):
+        self.cache_mode = cache_mode
         self.num_bits_per_copy = 128
+        self.kwargs = kwargs
 
 
 class _CpAsyncAtom:
@@ -41,9 +43,11 @@ class _UniversalAtom:
 
 def make_copy_atom(op, elem=None, num_bits_per_copy=None, **kw):
     if op.__class__.__name__ == "CopyG2SOp":
-        return _CpAsyncAtom(op, elem, num_bits_per_copy or 128)
+        bits = num_bits_per_copy or getattr(op, "num_bits_per_copy", 128)
+        return _CpAsyncAtom(op, elem, bits)
     if op.__class__.__name__ == "CopyUniversalOp":
-        bits = num_bits_per_copy or getattr(elem, "width", 32)
+        bits = (num_bits_per_copy or getattr(op, "num_bits_per_copy", None)
+                or getattr(elem, "width", 32))
         return _UniversalAtom(op, elem, bits)
     from self_cutedsl.frontend import builtins as _b
     return _b.make_copy_atom(op, elem, **kw)
@@ -77,10 +81,11 @@ class TVPartView:
     """Per-thread partitioned view: subscripts give per-value-unit objects
     (elem coordinate maps); drives copy()/autovec_copy/predicate_k."""
 
-    def __init__(self, tc, tensor, role):
+    def __init__(self, tc, tensor, role, stage=None):
         self.tc = tc
         self.tensor = tensor
         self.role = role
+        self.stage = stage
 
     # -- geometry -------------------------------------------------------
     @property
@@ -136,6 +141,13 @@ class TVPartView:
 
     def __getitem__(self, idx):
         if isinstance(idx, tuple):
+            # Canonical staged copy views use [..., stage].  Retain the
+            # selected stage on the partitioned destination instead of
+            # discarding it as the old elementwise-only view did.
+            selected = [value for value in idx if value is not None]
+            if len(idx) >= 3 and selected:
+                return TVPartView(self.tc, self.tensor, self.role,
+                                  stage=selected[-1])
             selector = idx[0]
             if selector is None or isinstance(selector, tuple):
                 return self
@@ -185,9 +197,126 @@ class _TVUnit:
 # ---------------------------------------------------------------------------
 # copy() lowering: cp.async per 16B block with predicate
 # ---------------------------------------------------------------------------
+
+def _is_matrix_view(src, dst):
+    """Recognize object-model Tensor views used by dense SM86 GEMM."""
+    from self_cutedsl.frontend.cute_objects import Tensor as HostTensor
+
+    return isinstance(getattr(src, "tensor", None), HostTensor) and \
+        isinstance(getattr(dst, "tensor", None), HostTensor) and \
+        hasattr(src.tensor, "origin") and hasattr(dst.tensor, "base")
+
+
+def _index_offset(e, terms):
+    """Materialize ``sum(coord * stride)`` as an index SSA value."""
+    total = e.idx_const(0)
+    for coord, stride in terms:
+        value = coord
+        if not hasattr(value, "type"):
+            value = e.idx_const(int(value))
+        elif value.type != "index":
+            value = e.ssa("index", f"arith.index_cast {value.name} : "
+                           f"{value.type} to index")
+        if int(stride) != 1:
+            value = e.idx_binop("arith.muli", value, int(stride))
+        total = e.idx_binop("arith.addi", total, value)
+    return total
+
+
+def _stage_offset(e, view, stage_stride):
+    stage = getattr(view, "stage", None)
+    if stage is None:
+        return e.idx_const(0)
+    if not hasattr(stage, "type"):
+        return e.idx_const(int(stage) * int(stage_stride))
+    value = stage if stage.type == "index" else e.ssa(
+        "index", f"arith.index_cast {stage.name} : {stage.type} to index")
+    return e.idx_binop("arith.muli", value, int(stage_stride))
+
+
+def copy_matrix_cpasync(src_view, dst_view):
+    """Emit the validated 16-byte SM86 matrix staging transactions.
+
+    The layout-derived source origin and destination stage replace the former
+    kernel-level ``block_m/block_n/kt`` offset expressions.  Request ownership
+    is intentionally unchanged: this preserves the measured two-round
+    64x64/64x128 schedule and its register/resource behavior.
+    """
+    from self_cutedsl.frontend.cute_objects import _flatten
+
+    e = _emitter()
+    src = src_view.tensor
+    dst = dst_view.tensor
+    src_shape = tuple(int(v) for v in _flatten(src.layout.shape))
+    dst_shape = tuple(int(v) for v in _flatten(dst.layout.shape))
+    if len(src_shape) < 2 or len(dst_shape) < 2:
+        raise ValueError("matrix cp.async requires rank-2 tile views")
+    operand = getattr(src_view.tc, "operand", None)
+    if operand is None:
+        operand = "A" if src_shape[0] >= src_shape[1] else "B"
+    if operand == "A":
+        tile_m, tile_k, minor = src_shape[0], src_shape[1], src_shape[1]
+        smem_stride = dst_shape[1]
+        stage_elems = tile_m * smem_stride
+    elif operand == "B":
+        tile_k, tile_n, minor = src_shape[0], src_shape[1], src_shape[1]
+        smem_stride = dst_shape[1]
+        stage_elems = tile_k * smem_stride
+    else:
+        raise ValueError(f"unknown matrix cp.async operand {operand!r}")
+    if tuple(dst_shape[:2]) != tuple(src_shape[:2]):
+        raise ValueError("source and destination tile shapes must match")
+    src_stride = tuple(int(v) for v in _flatten(src.layout.stride))
+    dst_stride = tuple(int(v) for v in _flatten(dst.layout.stride))
+    src_origin = _index_offset(e, getattr(src, "origin", ()))
+    stage_stride = dst_stride[2] if len(dst_stride) > 2 else stage_elems
+    stage_origin = _stage_offset(e, dst_view, stage_stride)
+    tile_elems = tile_m * tile_k if operand == "A" else tile_k * tile_n
+    requests = tile_elems // 8
+    threads = int(getattr(src_view.tc, "threads", 32 * 2 * 4))
+    rounds = (requests + threads - 1) // threads
+    tid = e.thread_id("x")
+    for request_round in range(rounds):
+        remaining = requests - request_round * threads
+        active_count = min(threads, remaining)
+        active = e.ssa("i1", f"arith.cmpi slt, {tid.name}, "
+                        f"{e.idx_const(active_count).name} : index")
+        e.open_if(active)
+        elem = e.idx_binop("arith.addi", e.idx_binop(
+            "arith.muli", tid, 8), request_round * threads * 8)
+        row = e.idx_binop("arith.divsi", elem, minor)
+        col = e.idx_binop("arith.remsi", elem, minor)
+        goff = e.idx_binop(
+            "arith.addi", src_origin,
+            e.idx_binop("arith.addi", e.idx_binop(
+                "arith.muli", row, src_stride[0]),
+                e.idx_binop("arith.muli", col, src_stride[1])))
+        soff = e.idx_binop(
+            "arith.addi", stage_origin,
+            e.idx_binop("arith.addi", e.idx_binop(
+                "arith.muli", row, dst_stride[0]),
+                e.idx_binop("arith.muli", col, dst_stride[1])))
+        gp = e.gep(src.base, goff, "f16")
+        sp = e.gep_smem(dst.base.ptr, soff)
+        e.raw('nvvm.inline_ptx "cp.async.ca.shared.global [$1], [$0], 16;" '
+              f'ro ({gp.name}, {sp.name} : !llvm.ptr<1>, !llvm.ptr<3>)')
+        e.close_if()
+
+
 def copy_cpasync(atom, tXgX, tXsX, pred):
-    """cute.copy(cpasync_atom, tXgX, tXsX, pred=tXpX): one cp.async.cg of
-    `bits` per B-block; predicate is a per-unit i1 list (or None)."""
+    """Lower a canonical cp.async tiled copy.
+
+    Matrix views produced by ``cute.local_tile`` use the SM86 matrix backend;
+    the original TV path below remains the implementation for elementwise and
+    predicated copies.  Both paths are selected from the partitioned view, so
+    application kernels do not expose raw pointer arithmetic.
+    """
+    if _is_matrix_view(tXgX, tXsX):
+        if pred is not None:
+            raise NotImplementedError(
+                "predicated SM86 matrix cp.async is not implemented")
+        copy_matrix_cpasync(tXgX, tXsX)
+        return
     e = _emitter()
     tc = tXgX.tc
     T, R, V, B = tXgX._geom
@@ -341,6 +470,100 @@ def _gep_smem(e, tensor, off):
     off32 = e.ssa("i64", f"arith.index_cast {off.name} : index to i64")
     return e.ssa("!llvm.ptr<3>",
                  f"llvm.getelementptr {p.name}[{off32.name}] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, f16")
+
+
+def copy_linear_cpasync(src, dst, operand, kt, tile_m, tile_n, tile_k,
+                        block_m, block_n, stride_a, stride_b, stage,
+                        threads=512, smem_stride_a=None, smem_stride_b=None,
+                        swizzle_bits=0):
+    """Stage one SM86 tile with aligned 16-byte cp.async requests.
+
+    Requests are distributed in rounds when a tile needs more than one
+    transaction per thread. This supports both the 512-thread 128x128
+    profile and smaller CTA profiles without changing the source layout.
+    """
+    e = _emitter()
+    tid = e.thread_id("x")
+    tile_elems = int(tile_m) * int(tile_k) if operand == "A" else int(tile_k) * int(tile_n)
+    smem_stride = (int(smem_stride_a) if operand == "A" and smem_stride_a is not None
+                   else int(smem_stride_b) if operand == "B" and smem_stride_b is not None
+                   else int(tile_k) if operand == "A" else int(tile_n))
+    smem_tile_elems = (int(tile_m) * smem_stride if operand == "A"
+                       else int(tile_k) * smem_stride)
+    requests = tile_elems // 8
+    rounds = (requests + int(threads) - 1) // int(threads)
+    kt = kt if hasattr(kt, "name") else e.idx_const(int(kt))
+    stage = stage if hasattr(stage, "name") else e.idx_const(int(stage))
+    block_m = block_m if hasattr(block_m, "name") else e.idx_const(int(block_m))
+    block_n = block_n if hasattr(block_n, "name") else e.idx_const(int(block_n))
+    for request_round in range(rounds):
+        remaining = requests - request_round * int(threads)
+        active_count = min(int(threads), remaining)
+        active = e.ssa("i1", f"arith.cmpi slt, {tid.name}, "
+                       f"{e.idx_const(active_count).name} : index")
+        e.open_if(active)
+        elem = e.idx_binop("arith.addi", e.idx_binop("arith.muli", tid, 8),
+                            request_round * int(threads) * 8)
+        if operand == "A":
+            local_row = e.idx_binop("arith.divsi", elem, int(tile_k))
+            row = e.idx_binop("arith.addi",
+                              e.idx_binop("arith.muli", block_m, int(tile_m)),
+                              local_row)
+            col = e.idx_binop("arith.remsi", elem, int(tile_k))
+            goff = e.idx_binop(
+                "arith.addi",
+                e.idx_binop("arith.muli", row, int(stride_a)),
+                e.idx_binop("arith.addi",
+                            e.idx_binop("arith.muli", kt, int(tile_k)), col))
+            soff = e.idx_binop(
+                "arith.addi", e.idx_binop("arith.muli", stage, smem_tile_elems),
+                e.idx_binop("arith.addi",
+                            e.idx_binop("arith.muli", local_row, smem_stride), col))
+        elif operand == "B":
+            kk = e.idx_binop("arith.divsi", elem, int(tile_n))
+            col = e.idx_binop("arith.remsi", elem, int(tile_n))
+            krow = e.idx_binop("arith.addi", e.idx_binop("arith.muli", kt, int(tile_k)), kk)
+            goff = e.idx_binop(
+                "arith.addi",
+                e.idx_binop("arith.muli", krow, int(stride_b)),
+                e.idx_binop("arith.addi",
+                            e.idx_binop("arith.muli", block_n, int(tile_n)), col))
+            soff = e.idx_binop(
+                "arith.addi", e.idx_binop("arith.muli", stage, smem_tile_elems),
+                e.idx_binop("arith.addi",
+                            e.idx_binop("arith.muli", kk, smem_stride), col))
+        else:
+            raise ValueError(f"unknown cp.async operand {operand!r}")
+        gp = e.gep(src.ptr, goff, "f16")
+        if swizzle_bits:
+            soff64 = e.ssa(
+                "i64", f"arith.index_cast {soff.name} : index to i64")
+            shift6 = e.ssa("i64", "arith.constant 6 : i64")
+            row_bits = e.ssa(
+                "i64", f"arith.shrui {soff64.name}, {shift6.name} : i64")
+            mask = e.ssa(
+                "i64", f"arith.constant {(1 << int(swizzle_bits)) - 1} : i64")
+            row_bits = e.ssa(
+                "i64", f"arith.andi {row_bits.name}, {mask.name} : i64")
+            shift3 = e.ssa("i64", "arith.constant 3 : i64")
+            xor_bits = e.ssa(
+                "i64", f"arith.shli {row_bits.name}, {shift3.name} : i64")
+            physical = e.ssa(
+                "i64", f"arith.xori {soff64.name}, {xor_bits.name} : i64")
+            soff = e.ssa(
+                "index", f"arith.index_cast {physical.name} : i64 to index")
+        sp = e.gep_smem(dst.ptr, soff)
+        e.raw('nvvm.inline_ptx "cp.async.ca.shared.global [$1], [$0], 16;" '
+              f'ro ({gp.name}, {sp.name} : !llvm.ptr<1>, !llvm.ptr<3>)')
+        e.close_if()
+
+
+def cp_async_commit_group():
+    _emitter().raw('nvvm.inline_ptx "cp.async.commit_group;"')
+
+
+def cp_async_wait_group(count=0):
+    _emitter().raw(f'nvvm.inline_ptx "cp.async.wait_group {int(count)};"')
 
 
 class CoordTile:

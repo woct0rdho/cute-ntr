@@ -1,8 +1,8 @@
-"""ptx_pipeline.py — drive the open MLIR → sm_120a PTX pipeline from Python.
+"""ptx_pipeline.py — drive the open MLIR → NVIDIA PTX pipeline from Python.
 
 Stages (all open-source):
   1. cutlass-compiler (BSD) : one-shot-convert-to-llvm
-                             attach-nvvm-target=chip=sm_120a
+                             attach-nvvm-target=chip=<target>
                              emit-gpu-binary=compilation-target=isa
   2. extract the textual PTX from the resulting gpu.binary attribute.
 
@@ -19,14 +19,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 CUTLASS_COMPILER = ROOT / "build-compiler/tools/cutlass-compiler/cutlass-compiler"
-
-DEFAULT_PASSES = [
-    "--one-shot-convert-to-llvm",
-    "--attach-nvvm-target=chip=sm_120a",
-    "--emit-gpu-binary=compilation-target=isa",
-]
+DEFAULT_TARGET = "sm_120a"
 
 _ASSEMBLY_RE = re.compile(r'assembly = "((?:[^"\\]|\\.)*)"')
+_TARGET_RE = re.compile(r"^\.target\s+(\S+)", re.MULTILINE)
+
+
+def _passes_for_target(target: str) -> list[str]:
+    if not isinstance(target, str) or not re.fullmatch(r"sm_\d+[a-z]?", target):
+        raise ValueError(f"unsupported NVIDIA target {target!r}; expected sm_<cc>")
+    return [
+        "--one-shot-convert-to-llvm",
+        f"--attach-nvvm-target=chip={target}",
+        "--emit-gpu-binary=compilation-target=isa",
+    ]
 
 
 def _compiler_command() -> Path:
@@ -51,11 +57,20 @@ def _unescape(s: str) -> str:
     )
 
 
-def compile_mlir_to_ptx(mlir_text: str | Path, extra_passes: list[str] | None = None) -> str:
-    """Compile an MLIR module (gpu.container_module) to textual sm_120a PTX."""
+def compile_mlir_to_ptx(
+    mlir_text: str | Path,
+    extra_passes: list[str] | None = None,
+    target: str = DEFAULT_TARGET,
+) -> str:
+    """Compile an MLIR module (gpu.container_module) to textual PTX.
+
+    ``target`` is an NVVM/NVPTX chip string such as ``sm_86`` or ``sm_120a``.
+    The default remains ``sm_120a`` for backwards compatibility.
+    """
     if isinstance(mlir_text, Path):
         mlir_text = mlir_text.read_text()
-    cmd = [str(_compiler_command()), *DEFAULT_PASSES, *(extra_passes or [])]
+    cmd = [str(_compiler_command()), *_passes_for_target(target),
+           *(extra_passes or [])]
     proc = subprocess.run(cmd, input=mlir_text, capture_output=True, text=True)
     if proc.returncode != 0:
         import os as _os
@@ -69,16 +84,18 @@ def compile_mlir_to_ptx(mlir_text: str | Path, extra_passes: list[str] | None = 
     out = proc.stdout
 
     targets = re.findall(r'#nvvm\.target<chip = "([^"]+)"', out)
-    if targets and any(t != "sm_120a" for t in targets):
-        raise RuntimeError(f"non-sm_120a target emitted: {targets}")
+    if targets and any(t != target for t in targets):
+        raise RuntimeError(f"requested {target}, but compiler emitted targets {targets}")
 
     m = _ASSEMBLY_RE.search(out)
     if not m:
         raise RuntimeError(f"no gpu.binary assembly in output:\n{out[:2000]}")
     ptx = _unescape(m.group(1))
 
-    if ".target sm_120a" not in ptx:
-        raise RuntimeError("emitted PTX is not .target sm_120a")
+    emitted_targets = _TARGET_RE.findall(ptx)
+    if emitted_targets != [target]:
+        raise RuntimeError(
+            f"requested {target}, but emitted PTX targets are {emitted_targets}")
     if ".entry" not in ptx:
         raise RuntimeError("emitted PTX contains no kernel entry")
     return ptx

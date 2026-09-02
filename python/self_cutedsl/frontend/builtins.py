@@ -419,13 +419,15 @@ def make_smem_array(name: str, count: int, element=None):
     return SmemArray(ptr, int(count), elem)
 
 
-def ldmatrix(smem, row_ssa, col_elems: int = 0, num: int = 4, trans: bool = False):
+def ldmatrix(smem, row_ssa, col_elems: int = 0, num: int = 4,
+             trans: bool = False, swizzle_bits: int = 0):
     """ldmatrix from smem at element offset (staged windows honored)."""
     e = _emitter()
     off = row_ssa
     soff = getattr(smem, "stage_offset", None)
     if soff is not None:
         off = e.idx_binop("arith.addi", off, soff)
+    off = _swizzle_f16(e, off, swizzle_bits)
     p = e.gep_smem(smem.ptr, off)
     return e.ldmatrix(p, num, trans)
 
@@ -765,20 +767,24 @@ def _is_swizzle_128b(swizzle):
     )
 
 
-def _swizzle_128b_f16(e, offset):
-    """Apply Swizzle<3,4,3> to a logical f16 shared-memory offset.
+def _swizzle_f16(e, offset, swizzle_bits):
+    """Apply CuTe's Swizzle<B,4,3> to an f16 element offset.
 
-    In bytes: ``x ^ (((x >> 7) & 7) << 4)``. Dividing both source and
-    destination bit positions by two gives the element-index expression.
+    For f16 elements the byte-level Swizzle<B,4,3> becomes
+    ``x ^ (((x >> 6) & ((1 << B) - 1)) << 3)``. B is selected from
+    the 128-bit copy width and the leading shared-memory dimension.
     """
+    if not swizzle_bits:
+        return offset
     offset64 = e.ssa(
         "i64", f"arith.index_cast {offset.name} : index to i64")
     shift6 = e.ssa("i64", "arith.constant 6 : i64")
     row_bits = e.ssa(
         "i64", f"arith.shrui {offset64.name}, {shift6.name} : i64")
-    mask7 = e.ssa("i64", "arith.constant 7 : i64")
+    mask = e.ssa(
+        "i64", f"arith.constant {(1 << int(swizzle_bits)) - 1} : i64")
     row_bits = e.ssa(
-        "i64", f"arith.andi {row_bits.name}, {mask7.name} : i64")
+        "i64", f"arith.andi {row_bits.name}, {mask.name} : i64")
     shift3 = e.ssa("i64", "arith.constant 3 : i64")
     xor_bits = e.ssa(
         "i64", f"arith.shli {row_bits.name}, {shift3.name} : i64")
@@ -786,6 +792,89 @@ def _swizzle_128b_f16(e, offset):
         "i64", f"arith.xori {offset64.name}, {xor_bits.name} : i64")
     return e.ssa(
         "index", f"arith.index_cast {physical.name} : i64 to index")
+
+
+def _swizzle_128b_f16(e, offset):
+    return _swizzle_f16(e, offset, 3)
+
+
+def _origin_offset(e, tensor):
+    """Materialize a Tensor view's layout-derived dynamic origin."""
+    total = e.idx_const(0)
+    for coord, stride in getattr(tensor, "origin", ()):
+        value = coord
+        if not hasattr(value, "type"):
+            value = e.idx_const(int(value))
+        elif value.type != "index":
+            value = e.ssa("index", f"arith.index_cast {value.name} : "
+                           f"{value.type} to index")
+        term = e.idx_binop("arith.muli", value, int(stride)) \
+            if int(stride) != 1 else value
+        total = e.idx_binop("arith.addi", total, term)
+    return total
+
+
+def copy_mma_to_gmem(tc, acc, dst):
+    """Lower an official-style MMA C tiled copy to global stores.
+
+    The lane/register mapping is kept in this backend trait implementation;
+    the kernel sees only ``partition_C`` and ``cute.copy``.  This preserves
+    the validated scalar epilogue instruction schedule while making the
+    source-level ownership model reusable by other MMA kernels.
+    """
+    from .cute_objects import MmaGmemView, _flatten
+    from .kernel_objects import Fragment
+
+    if not isinstance(dst, MmaGmemView) or not isinstance(acc, Fragment):
+        raise TypeError("MMA C copy needs Fragment -> MmaGmemView")
+    e = _emitter()
+    mma = tc.mma
+    am, an, _ = getattr(mma.op, "shape_mnk", (16, 8, 16))
+    warp_m, warp_n = mma.tile_mn
+    mm, mn = warp_m // am, warp_n // an
+    atom_shape = _flatten(mma.atom_layout)
+    warps_m = int(atom_shape[0]) if atom_shape else 1
+    tidx = _ix(e, tc.tidx)
+    lane = _ixop(e, "arith.remsi", tidx, _ix(e, 32))
+    wid = _ixop(e, "arith.divsi", tidx, _ix(e, 32))
+    wm, wn = _warp_mn_coord(e, mma, wid, warps_m, max(1, mn))
+    group = _ixop(e, "arith.divsi", lane, _ix(e, 4))
+    t2 = _ixop(e, "arith.muli",
+               _ixop(e, "arith.remsi", lane, _ix(e, 4)), _ix(e, 2))
+    tensor = dst.tensor
+    stride = tuple(int(v) for v in _flatten(tensor.layout.stride))
+    origin = _origin_offset(e, tensor)
+    elem = getattr(tc.atom, "element_type", None) or \
+        getattr(tc.atom, "elem", None)
+    elem_name = getattr(elem, "name", "Float16")
+    ety = "f32" if elem_name in ("f32", "Float32") else "f16"
+    for i in range(mm):
+        row_base = _ixop(e, "arith.addi",
+                         _ixop(e, "arith.muli", wm, _ix(e, warp_m)),
+                         _ix(e, i * 16))
+        for na in range(mn):
+            col_base = _ixop(e, "arith.addi",
+                             _ixop(e, "arith.muli", wn, _ix(e, warp_n)),
+                             _ix(e, na * 8))
+            for j in range(4):
+                slot = (i * mn + na) * 4 + j
+                value = acc.slots.get(slot)
+                if value is None:
+                    continue
+                row = _ixop(e, "arith.addi", row_base,
+                            _ixop(e, "arith.addi", group,
+                                  _ix(e, 8 if j >= 2 else 0)))
+                col = _ixop(e, "arith.addi", col_base,
+                            _ixop(e, "arith.addi", t2,
+                                  _ix(e, 1 if j % 2 else 0)))
+                off = _ixop(e, "arith.addi", origin,
+                            _ixop(e, "arith.addi",
+                                  _ixop(e, "arith.muli", row, stride[0]),
+                                  _ixop(e, "arith.muli", col, stride[1])))
+                if ety == "f16" and value.type == "f32":
+                    value = e.ssa("f16", f"arith.truncf {value.name} : f32 to f16")
+                ptr = e.gep(tensor.base, off, ety)
+                e.raw(f"llvm.store {value.name}, {ptr.name} : {ety}, !llvm.ptr<1>")
 
 
 def copy_tiled(tc, src, dst):
@@ -807,13 +896,17 @@ def copy_tiled(tc, src, dst):
     flat_shp = [int(d) for d in _flatten(lay.shape)]
     flat_str = [int(d) for d in _flatten(lay.stride)]
     elems_per_stage = flat_shp[0] * flat_shp[1]
+    # Staged layouts may include row padding, so the physical stage stride is
+    # the third layout stride rather than logical tile size.
+    stage_stride = flat_str[2] if len(flat_str) > 2 else elems_per_stage
     tidx = _ix(e, tc.tidx)
 
     _ak = getattr(getattr(tc.mma, "op", None), "shape_mnk", (16, 8, 16))[2]
     if _ak >= 64:
         # fp4 arrays are byte-typed: halve the element count for windows
         elems_per_stage = elems_per_stage // 2
-    win = smem_stage(arr, src.stage, elems_per_stage)
+        stage_stride = stage_stride // 2
+    win = smem_stage(arr, src.stage, stage_stride)
     soff = win.stage_offset
 
     mma = tc.mma
@@ -906,23 +999,25 @@ def copy_tiled(tc, src, dst):
                                   f"llvm.load {p.name} : !llvm.ptr<3> -> i32"))
         dst.frag.slots[dst.k] = regs
     else:
-        # smem layout (n,k):(k,1): ldmatrix.x2 rows=n; mat1 = +8 k elements
+        # Row-major B is physically (K,N):(N,1).  The transposed ldmatrix
+        # operand takes each lane's K-row address and the atom's N-column
+        # offset; the old compatibility path accidentally exchanged these
+        # coordinates and could address beyond a short-K shared tile.
         regs = []
         for na in range(mn):
-            n_base = _ixop(e, "arith.addi",
-                           _ixop(e, "arith.muli", wn, _ix(e, warp_n)),
-                           _ix(e, na * 8))
-            n_row = _ixop(e, "arith.addi", n_base,
-                          _ixop(e, "arith.remsi", lane, _ix(e, 8)))
-            kk8 = _ixop(e, "arith.muli",
-                        _ixop(e, "arith.divsi", lane, _ix(e, 8)), _ix(e, 8))
+            n_col = _ixop(e, "arith.addi",
+                          _ixop(e, "arith.muli", wn, _ix(e, warp_n)),
+                          _ix(e, na * 8))
+            k_row = _ixop(e, "arith.addi", k0,
+                          _ixop(e, "arith.remsi", lane, _ix(e, 16)))
             off = _ixop(e, "arith.addi", soff,
                         _ixop(e, "arith.addi",
-                              _ixop(e, "arith.muli", n_row, row_str),
-                              _ixop(e, "arith.addi", k0, kk8)))
+                              _ixop(e, "arith.muli", k_row, row_str),
+                              n_col))
             if use_swizzle:
                 off = _swizzle_128b_f16(e, off)
-            f = e.ldmatrix(e.gep_smem(arr.ptr, off), 2, trans=False)
+            trans = bool(getattr(getattr(tc.atom, "op", None), "trans", True))
+            f = e.ldmatrix(e.gep_smem(arr.ptr, off), 2, trans=trans)
             regs.extend(e.extract_i32(f, j) for j in range(2))
         dst.frag.slots[dst.k] = regs
 
@@ -972,7 +1067,8 @@ def copy_r2s(tc, src, dst):
     flat_shp = [int(d) for d in _flatten(lay.shape)]
     flat_str = [int(d) for d in _flatten(lay.stride)]
     elems_per_stage = flat_shp[0] * flat_shp[1]
-    win = smem_stage(arr, dst.stage, elems_per_stage)
+    stage_stride = flat_str[2] if len(flat_str) > 2 else elems_per_stage
+    win = smem_stage(arr, dst.stage, stage_stride)
     soff = win.stage_offset
 
     mma = tc.mma

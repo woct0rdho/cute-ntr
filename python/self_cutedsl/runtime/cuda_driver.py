@@ -1,4 +1,4 @@
-"""cuda_driver.py — CUDA Driver JIT runtime for sm_120a textual PTX.
+"""cuda_driver.py — CUDA Driver JIT runtime for selectable NVIDIA PTX targets.
 
 Loads PTX produced by the open compiler stack (cutlass-compiler passes +
 LLVM NVPTX) via cuModuleLoadDataEx and launches kernels via cuLaunchKernel.
@@ -25,6 +25,18 @@ except ImportError:  # cuda-bindings >= 13 layout
 
 TARGET = "sm_120a"
 PTX_VERSION = "8.7"
+
+
+def _target_capability(target: str) -> tuple[int, int]:
+    import re
+
+    m = re.fullmatch(r"sm_(\d+)([a-z]?)", target)
+    if not m:
+        raise ValueError(f"invalid NVIDIA target {target!r}")
+    digits = m.group(1)
+    if len(digits) < 2:
+        raise ValueError(f"invalid NVIDIA target {target!r}")
+    return int(digits[:-1]), int(digits[-1])
 
 
 def _check(err: "cu.CUresult | tuple", api: str) -> None:
@@ -61,17 +73,28 @@ class LaunchManifest:
 class DriverJit:
     """Owns CUDA init + one module loaded from textual PTX."""
 
-    def __init__(self, ptx: str | bytes):
+    def __init__(self, ptx: str | bytes, target: str = TARGET,
+                 validate_device: bool = True):
         self._func_cache: dict = {}
+        expected = f".target {target}"
         if isinstance(ptx, str):
             ptx = ptx.encode() + b"\x00"  # NUL-terminated image (driver reads to NUL)
-        # Sanity: our one and only target.
-        head = ptx[:512].decode(errors="replace")
-        if ".target sm_120a" not in head:
-            raise ValueError(f"refusing to load PTX that is not .target sm_120a:\n{head}")
+        head = ptx[:4096].decode(errors="replace")
+        if expected not in head:
+            raise ValueError(f"refusing to load PTX without {expected}:\n{head}")
         _check(cu.cuInit(0), "cuInit")
         err, dev = cu.cuDeviceGet(0)
         _check(err, "cuDeviceGet")
+        self.device = dev
+        err, major, minor = cu.cuDeviceComputeCapability(dev)
+        _check(err, "cuDeviceComputeCapability")
+        self.device_capability = (int(major), int(minor))
+        required = _target_capability(target)
+        if validate_device and self.device_capability != required:
+            raise RuntimeError(
+                f"PTX target {target} requires compute capability {required[0]}.{required[1]}, "
+                f"but device reports {self.device_capability[0]}.{self.device_capability[1]}")
+        self.target = target
         err, self._ctx = cu.cuDevicePrimaryCtxRetain(dev)
         _check(err, "cuDevicePrimaryCtxRetain")
         _check(cu.cuCtxSetCurrent(self._ctx), "cuCtxSetCurrent")

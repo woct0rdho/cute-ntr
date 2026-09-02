@@ -42,6 +42,16 @@ def range_constexpr(*args, **kw):
     return range(*args, **kw)
 
 
+def range_dynamic(*args, **kw):
+    """Marker for a runtime-bounded loop handled by the AST frontend.
+
+    The official helper is replaced before Python executes the loop body.  A
+    direct host call is intentionally rejected instead of silently producing
+    a host range, which catches uses outside a traced kernel.
+    """
+    raise RuntimeError("range_dynamic should be used inside a traced kernel")
+
+
 def const_expr(cond):
     """cutlass.const_expr(cond) — trace-time conditional; the condition is
     a python bool at trace time (official partial evaluation)."""

@@ -178,7 +178,7 @@ class KernelInterpreter:
                 val = self.eval(node.value)
                 base[idx] = val
             elif isinstance(base, list):
-                idx = int(_const_index(self.eval(tgt.slice)))
+                idx = self._eval_subscript_index(tgt.slice)
                 val = self.eval(node.value)
                 base[idx] = val
             else:
@@ -214,6 +214,9 @@ class KernelInterpreter:
         elif isinstance(node, ast.Assign):
             value = self.eval(node.value)
             self.assign(node.targets[0], value)
+        elif isinstance(node, ast.AnnAssign):
+            if node.value is not None:
+                self.assign(node.target, self.eval(node.value))
         elif isinstance(node, ast.AugAssign):
             cur = self.eval(node.target)
             rhs = self.eval(node.value)
@@ -260,47 +263,71 @@ class KernelInterpreter:
     def exec_if(self, node: ast.If) -> None:
         cond = _unwrap_typed_scalar(self.eval(node.test))
         if isinstance(cond, SSA):
-            # region semantics: assignments inside scf.if are branch-local
-            # (no yield machinery); restore the pre-if env afterwards so
-            # sibling branches (elif chains) start from the same state
+            # Dynamic branches use the same storage-root analysis as dynamic
+            # loops.  In particular, ``values[0] = ...`` must be yielded by
+            # scf.if when values is a Python list or register fragment.
             snapshot = dict(self.env)
             snaps = [(v, v.__snapshot__()) for v in snapshot.values()
                      if hasattr(type(v), "__snapshot__")]
-            carried = []
+            carriers = []
             for name in sorted(self._assigned_names(node.body + node.orelse)):
                 if name not in snapshot:
                     continue
-                value = self._as_ssa(snapshot[name])
-                if value is not None:
-                    carried.append((name, value))
-            if carried:
-                results = self.emitter.open_if_results(
-                    cond, [value.type for _, value in carried])
+                state = self._make_loop_carrier(name, snapshot[name])
+                if state is not None:
+                    carriers.append(state)
+            carrier_objects = []
+            for state in carriers:
+                self._capture_carrier_objects(state["shape"], carrier_objects)
+
+            def reset_branch():
+                self.env = dict(snapshot)
+                for value, snap in snaps:
+                    value.__restore__(snap)
+                self._restore_carrier_objects(carrier_objects)
+                for state in carriers:
+                    self._bind_loop_carrier(
+                        state["name"], state["shape"], state["init"])
+
+            def branch_values(state):
+                values = [self._as_ssa(item, template=state["template"])
+                          for item in self._flatten_loop_value(
+                              self.env[state["name"]])]
+                if len(values) != len(state["init"]) \
+                        or any(item is None for item in values):
+                    raise InterpError(
+                        "dynamic branch changed the shape of a loop-carried value")
+                return values
+
+            if carriers:
+                types = [item.type for state in carriers
+                         for item in state["init"]]
+                results = self.emitter.open_if_results(cond, types)
+                reset_branch()
                 for s in node.body:
                     self.exec_stmt(s)
-                then_values = [
-                    self._as_ssa(self.env.get(name, snapshot[name]), template=value)
-                    for name, value in carried
-                ]
+                then_values = []
+                for state in carriers:
+                    then_values.extend(branch_values(state))
                 self.emitter.yield_values(then_values)
                 self.emitter.open_else()
-                self.env = dict(snapshot)
-                for value, snap in snaps:
-                    value.__restore__(snap)
+                reset_branch()
                 for s in node.orelse:
                     self.exec_stmt(s)
-                else_values = [
-                    self._as_ssa(self.env.get(name, snapshot[name]), template=value)
-                    for name, value in carried
-                ]
+                else_values = []
+                for state in carriers:
+                    else_values.extend(branch_values(state))
                 self.emitter.yield_values(else_values)
                 self.emitter.close_if()
-                self.env = dict(snapshot)
-                for value, snap in snaps:
-                    value.__restore__(snap)
-                for (name, _), result in zip(carried, results):
-                    self.env[name] = result
+                reset_branch()
+                k = 0
+                for state in carriers:
+                    n = len(state["init"])
+                    self._bind_loop_carrier(
+                        state["name"], state["shape"], results[k:k + n])
+                    k += n
                 return
+
             self.emitter.open_if(cond)
             for s in node.body:
                 self.exec_stmt(s)
@@ -458,17 +485,26 @@ class KernelInterpreter:
     def _assigned_names(nodes) -> set[str]:
         assigned = set()
 
+        def root_name(target):
+            while isinstance(target, (ast.Subscript, ast.Attribute)):
+                target = target.value
+            return target.id if isinstance(target, ast.Name) else None
+
         def add_target(target):
-            if isinstance(target, ast.Name):
-                assigned.add(target.id)
-            elif isinstance(target, (ast.Tuple, ast.List)):
+            if isinstance(target, (ast.Tuple, ast.List)):
                 for elt in target.elts:
                     add_target(elt)
+                return
+            root = root_name(target)
+            if root is not None:
+                assigned.add(root)
 
         def visit(node):
             if isinstance(node, ast.Assign):
                 for target in node.targets:
                     add_target(target)
+            elif isinstance(node, ast.AnnAssign):
+                add_target(node.target)
             elif isinstance(node, ast.AugAssign):
                 add_target(node.target)
             for child in ast.iter_child_nodes(node):
@@ -555,33 +591,39 @@ class KernelInterpreter:
         )
 
     def exec_for(self, node: ast.For) -> None:
-        # `for x in range(...)` / cutlass.range_constexpr(...) supported
+        # The official preprocessor recognizes these names without executing
+        # range_dynamic in Python.  Keep that distinction here as well.
         fname = ""
         if isinstance(node.iter, ast.Call):
             f = node.iter.func
-            fname = getattr(f, "id", None) or getattr(f, "attr", "")                 if isinstance(f, (ast.Name, ast.Attribute)) else ""
-        assert isinstance(node.iter, ast.Call) and fname in ("range", "range_constexpr"), \
-            f"only range()/range_constexpr() loops supported (got {fname!r})"
+            if isinstance(f, (ast.Name, ast.Attribute)):
+                fname = getattr(f, "id", None) or getattr(f, "attr", "")
+        assert isinstance(node.iter, ast.Call) and fname in (
+            "range", "range_constexpr", "range_dynamic"), \
+            f"only range()/range_constexpr()/range_dynamic() loops supported (got {fname!r})"
+        if not 1 <= len(node.iter.args) <= 3:
+            raise InterpError("range loops require one to three positional bounds")
         iter_args = [_unwrap_typed_scalar(self.eval(a)) for a in node.iter.args]
         if fname == "range_constexpr":
             iter_args = [int(getattr(a, "value", a)) for a in iter_args]
         import os as _os
         if _os.environ.get("SC_TRACE"):
             print("EXEC_FOR range args:", iter_args, file=__import__("sys").stderr)
-        if all(isinstance(a, int) for a in iter_args):
+        if fname != "range_dynamic" and all(isinstance(a, int) for a in iter_args):
             # constexpr loop: unroll in Python (mirrors official partial eval)
-            filled = (list(iter_args) + [0, None, 1])[:3]
-            lo = filled[0] if len(iter_args) > 1 else 0
-            hi = filled[1] if len(iter_args) > 1 else iter_args[0]
-            st = filled[2] if len(iter_args) > 2 else 1
-            rng = range(lo, hi, st)
-            # rebind the target as constexpr per iteration
+            if len(iter_args) == 1:
+                rng = range(iter_args[0])
+            else:
+                rng = range(*iter_args)
             for i in rng:
                 self.assign(node.target, i)
                 for s in node.body:
                     self.exec_stmt(s)
             return
-        # dynamic bounds -> scf.for (normalize 1-arg range to (0, n, 1))
+
+        # Dynamic bounds -> scf.for.  Loop-carried Python containers are
+        # flattened into scalar iter_args, just as the official PyIR path
+        # flattens a structured value into the region signature.
         if len(iter_args) == 1:
             iter_args = [0, iter_args[0]]
         args = iter_args + [1]
@@ -590,79 +632,205 @@ class KernelInterpreter:
         st = self._to_index(args[2]) if not isinstance(args[2], int) else self._index_const(args[2])
         tgt = node.target.id if isinstance(node.target, ast.Name) else None
         loop_snapshot = dict(self.env)
-        carried = self._loop_carried(node.body, tgt)
-        init_vals, init_shapes = [], []
-        scalar_templates = {}
-        for name in carried:
-            v = self.env[name]
-            if isinstance(v, SSA):
-                init_vals.append(v)
-                init_shapes.append((name, None))
-                scalar_templates[name] = v
-            else:
-                init_vals.extend(v)
-                init_shapes.append((name, len(v)))
+        carriers = []
+        init_vals = []
+        for name in self._loop_carried(node.body, tgt):
+            state = self._make_loop_carrier(name, self.env[name])
+            if state is not None:
+                carriers.append(state)
+                init_vals.extend(state["init"])
 
-        iv, arg_ssas, res_ssas = self.emitter.open_for(lb, ub, st, init_vals or None)
+        iv, arg_ssas, res_ssas = self.emitter.open_for(
+            lb, ub, st, init_vals or None)
         self.assign(node.target, iv)
         k = 0
-        for name, length in init_shapes:
-            if length is None:
-                self.env[name] = arg_ssas[k]
-                k += 1
-            else:
-                self.env[name] = list(arg_ssas[k:k + length])
-                k += length
+        for state in carriers:
+            n = len(state["init"])
+            self._bind_loop_carrier(state["name"], state["shape"],
+                                    arg_ssas[k:k + n])
+            k += n
         for s in node.body:
             self.exec_stmt(s)
-        if init_shapes:
-            cur = []
-            for name, length in init_shapes:
-                v = self.env[name]
-                if length is None:
-                    cur.append(self._as_ssa(v, template=scalar_templates[name]))
-                else:
-                    cur.extend(
-                        self._as_ssa(item, template=init_vals[0])
-                        for item in v
-                    )
-            self.emitter.yield_for(cur)
+        if carriers:
+            yielded = []
+            for state in carriers:
+                value = self.env[state["name"]]
+                leaves = self._flatten_loop_value(value)
+                template = state["template"]
+                yielded.extend(self._as_ssa(item, template=template)
+                               for item in leaves)
+            expected = sum(len(state["init"]) for state in carriers)
+            if len(yielded) != expected or any(item is None for item in yielded):
+                raise InterpError(
+                    "dynamic loop changed the shape of a loop-carried value")
+            self.emitter.yield_for(yielded)
         self.emitter.close_for()
         self.env = dict(loop_snapshot)
         k = 0
-        for name, length in init_shapes:
-            if length is None:
-                self.env[name] = res_ssas[k]
-                k += 1
+        for state in carriers:
+            n = len(state["init"])
+            self._bind_loop_carrier(state["name"], state["shape"],
+                                    res_ssas[k:k + n])
+            k += n
+
+    def _make_loop_carrier(self, name, value):
+        """Describe a scalar, Python sequence, or register Fragment state."""
+        from .kernel_objects import Fragment, _FragSlice
+
+        def describe(v):
+            if isinstance(v, (SSA,)) or hasattr(v, "ssa"):
+                return ("leaf",), [v]
+            if isinstance(v, bool) or isinstance(v, (int, float)):
+                return ("leaf",), [v]
+            if isinstance(v, (list, tuple)):
+                children, leaves = [], []
+                for item in v:
+                    child = describe(item)
+                    if child is None:
+                        return None
+                    children.append(child[0])
+                    leaves.extend(child[1])
+                return (("tuple" if isinstance(v, tuple) else "list", children), leaves)
+            if isinstance(v, Fragment):
+                keys = tuple(sorted(v.slots))
+                leaves = [v.slots[k] for k in keys]
+                return (("fragment", v, keys), leaves) if leaves else None
+            if isinstance(v, _FragSlice):
+                keys = tuple(range(v.base, v.base + v.count))
+                leaves = [v.holder.slots[k] for k in keys]
+                return (("frag_slice", v, keys), leaves) if leaves else None
+            return None
+
+        desc = describe(value)
+        if desc is None:
+            return None
+        shape, leaves = desc
+        if not leaves:
+            return None
+        dynamic = [self._as_ssa(item) for item in leaves]
+        template = next((item for item in dynamic if item is not None), None)
+        if template is None:
+            # A literal initial value can still be loop-carried when the body
+            # derives a dynamic value from it (for example ``total += i``).
+            if any(isinstance(item, float) for item in leaves):
+                template = self.emitter.ssa(
+                    "f32", "arith.constant 0.0 : f32")
+            elif any(isinstance(item, bool) for item in leaves):
+                template = self.emitter.ssa(
+                    "i1", "arith.constant 0 : i1")
             else:
-                self.env[name] = list(res_ssas[k:k + length])
-                k += length
+                template = self.emitter.const_i32(0)
+        init = [self._as_ssa(item, template=template) for item in leaves]
+        if any(item is None for item in init):
+            raise InterpError(f"unsupported mixed loop-carried value {name!r}")
+        return {"name": name, "shape": shape, "init": init,
+                "template": template}
+
+    def _flatten_loop_value(self, value):
+        from .kernel_objects import Fragment, _FragSlice
+        if isinstance(value, (list, tuple)):
+            out = []
+            for item in value:
+                out.extend(self._flatten_loop_value(item))
+            return out
+        if isinstance(value, Fragment):
+            return [value.slots[k] for k in sorted(value.slots)]
+        if isinstance(value, _FragSlice):
+            return [value.holder.slots[k]
+                    for k in range(value.base, value.base + value.count)]
+        return [value]
+
+    def _capture_carrier_objects(self, shape, captured):
+        kind = shape[0]
+        if kind in ("list", "tuple"):
+            for child in shape[1]:
+                self._capture_carrier_objects(child, captured)
+        elif kind == "fragment":
+            obj, keys = shape[1], shape[2]
+            captured.append((obj, keys, [obj.slots[key] for key in keys]))
+        elif kind == "frag_slice":
+            obj, keys = shape[1], shape[2]
+            captured.append((obj.holder, keys,
+                             [obj.holder.slots[key] for key in keys]))
+
+    @staticmethod
+    def _restore_carrier_objects(captured):
+        for obj, keys, values in captured:
+            for key, value in zip(keys, values):
+                obj.slots[key] = value
+
+    def _bind_loop_carrier(self, name, shape, values):
+        pos = [0]
+        def build(desc):
+            kind = desc[0]
+            if kind == "leaf":
+                if pos[0] >= len(values):
+                    raise InterpError("missing dynamic loop-carried value")
+                value = values[pos[0]]
+                pos[0] += 1
+                return value
+            if kind in ("list", "tuple"):
+                result = [build(child) for child in desc[1]]
+                return tuple(result) if kind == "tuple" else result
+            obj, keys = desc[1], desc[2]
+            if kind == "fragment":
+                for key in keys:
+                    obj.slots[key] = build(("leaf",))
+                return obj
+            for key in keys:
+                obj.holder.slots[key] = build(("leaf",))
+            return obj
+        self.env[name] = build(shape)
 
     def _loop_carried(self, body, target_name=None) -> list[str]:
-        """Names rebound in the loop body holding SSA values (any type) or
-        lists of SSAs — excluding the loop induction variable."""
+        """Find loop writes, including subscript writes to a container root."""
+        from .kernel_objects import Fragment, _FragSlice
+
         assigned = set()
+
+        def root_name(target):
+            while isinstance(target, (ast.Subscript, ast.Attribute)):
+                target = target.value
+            return target.id if isinstance(target, ast.Name) else None
+
+        def add_target(target):
+            if isinstance(target, (ast.Tuple, ast.List)):
+                for item in target.elts:
+                    add_target(item)
+                return
+            root = root_name(target)
+            if root is not None:
+                assigned.add(root)
 
         def walk(n):
             if isinstance(n, ast.Assign):
-                for t in n.targets:
-                    if isinstance(t, ast.Name):
-                        assigned.add(t.id)
-            for ch in ast.iter_child_nodes(n):
-                walk(ch)
+                for target in n.targets:
+                    add_target(target)
+            elif isinstance(n, ast.AnnAssign):
+                add_target(n.target)
+            elif isinstance(n, ast.AugAssign):
+                add_target(n.target)
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+                root = root_name(n.func.value)
+                if root in self.env and isinstance(
+                        self.env[root], (Fragment, _FragSlice)):
+                    assigned.add(root)
+                # cute.gemm mutates its accumulator fragment in the
+                # canonical API rather than returning a newly allocated
+                # object.  Treat the accumulator argument as a loop-carried
+                # value so dynamic K loops yield its SSA registers correctly.
+                if n.func.attr == "gemm":
+                    for arg in n.args[1:2]:
+                        if isinstance(arg, ast.Name) and isinstance(
+                                self.env.get(arg.id), Fragment):
+                            assigned.add(arg.id)
+            for child in ast.iter_child_nodes(n):
+                walk(child)
 
-        for st in body:
-            walk(st)
-        out = []
-        for name in sorted(assigned):
-            if name == target_name:
-                continue
-            v = self.env.get(name)
-            if isinstance(v, SSA):
-                out.append(name)
-            elif isinstance(v, list) and v and all(isinstance(x, SSA) for x in v):
-                out.append(name)
-        return out
+        for statement in body:
+            walk(statement)
+        return sorted(name for name in assigned if name != target_name
+                      and name in self.env)
 
     def _to_index(self, v) -> SSA:
         if isinstance(v, SSA):
@@ -683,14 +851,26 @@ class KernelInterpreter:
             self.env[target.id] = value
         elif isinstance(target, ast.Subscript):
             base = self.eval(target.value)
-            idx = self.eval(target.slice)
+            idx = self._eval_subscript_index(target.slice)
             base[idx] = value
         else:
             raise InterpError(f"unsupported assign target {ast.dump(target)[:60]}")
 
     def assign_ast(self, target: ast.expr, value) -> None:
-        if isinstance(target, ast.Name):
-            self.env[target.id] = value
+        if isinstance(target, (ast.Name, ast.Subscript)):
+            self.assign(target, value)
+
+    def _eval_subscript_index(self, node):
+        if isinstance(node, ast.Slice):
+            lo = self.eval(node.lower) if node.lower else None
+            hi = self.eval(node.upper) if node.upper else None
+            step = self.eval(node.step) if node.step else None
+            return slice(
+                None if lo is None else int(_const_index(lo)),
+                None if hi is None else int(_const_index(hi)),
+                None if step is None else int(_const_index(step)),
+            )
+        return self.eval(node)
 
     # --------------------------------------------------------------- exprs
     def eval(self, node: ast.expr):
@@ -1221,6 +1401,9 @@ class KernelInterpreter:
         return b
 
     def _const_like(self, like: SSA, value) -> SSA:
+        if like.type == "i1":
+            return self.emitter.ssa(
+                "i1", f"arith.constant {int(bool(value))} : i1")
         if like.type == "i32":
             return self.emitter.const_i32(int(value))
         if like.type == "i64":

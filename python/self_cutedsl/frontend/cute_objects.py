@@ -25,7 +25,7 @@ def _flatten(x):
             if hasattr(v, "outer") and hasattr(v, "stages"):
                 rec(v.outer.shape)      # staged layout: per-stage shape
                 return
-            if isinstance(v, _CL):
+            if isinstance(v, _CL) or v.__class__.__name__ == "CuteLayout":
                 rec(v.shape)
             else:
                 out.append(int(v))
@@ -472,28 +472,30 @@ def _stride_for_group(shp, str_, i, j):
 
 
 def zipped_divide(tensor_or_layout, tiler):
-    """Divide into ((tile), (rest)) hierarchical layout; modes beyond the
-    tiler rank ride the rest group unchanged (the implicit L mode)."""
+    """Divide into ((tile), (rest)) using the source's actual strides.
+
+    The rest strides are tile strides, not row-major ordinal strides.  This is
+    the distinction that lets a local tile carry an exact dynamic pointer
+    origin while retaining the official hierarchical layout shape.
+    """
     lay = tensor_or_layout.layout if isinstance(tensor_or_layout, Tensor) else tensor_or_layout
-    tshp = _flatten(tiler)
+    tshp = tuple(_flatten(tiler))
     shp = _flatten(lay.shape)
     strd = _flatten(lay.stride)
-    pad = (1,) * (len(shp) - len(tshp))
-    tshp_padded = tuple(tshp) + pad
+    tshp_padded = tshp + (1,) * (len(shp) - len(tshp))
     rest = tuple(-(-s // t) for s, t in zip(shp, tshp_padded))
-    tshp = tuple(tshp) + ()      # tile group keeps the tiler's own rank
     tile_layout = Layout(tuple(tshp), tuple(strd[:len(tshp)]))
-    rest_shape = tuple(rest)
+    rest_stride = tuple(t * d for t, d in zip(tshp_padded, strd))
+    rest_layout = Layout(rest, rest_stride)
+    result = Layout((tile_layout.shape, rest_layout.shape),
+                    (tile_layout.stride, rest_layout.stride))
     if isinstance(tensor_or_layout, Tensor):
-        nv = Tensor(tensor_or_layout.base,
-                    Layout((tile_layout.shape, rest_shape),
-                           (tile_layout.stride, _row_major_nested(rest_shape))),
+        nv = Tensor(tensor_or_layout.base, result,
                     tensor_or_layout.element, tensor_or_layout.origin)
         nv.coord_offs = dict(getattr(tensor_or_layout, "coord_offs", {}))
         nv.swizzle = getattr(tensor_or_layout, "swizzle", None)
         return nv
-    return Layout((tile_layout.shape, rest_shape),
-                  (tile_layout.stride, _row_major_nested(rest_shape)))
+    return result
 
 
 def local_tile(tensor, tiler, coord):
@@ -509,22 +511,19 @@ def _select_rest(tiled, coord):
     rest_stride_f = _flatten(lay.stride[1])
     coord_f = coord if isinstance(coord, (tuple, list)) else (coord,)
     keep_shape, keep_stride = [], []
-    for r, c in zip(rest_shape_f, coord_f):
+    origin = list(getattr(tiled, "origin", ()))
+    for r, d, c in zip(rest_shape_f, rest_stride_f, coord_f):
         if c is None:
             keep_shape.append(r)
-            keep_stride.append(None)  # patched below
-    # strides for kept modes: recompute row-major over kept shape
-    ks = [k for k in keep_shape]
-    strides, acc = [], 1
-    for d in reversed(ks):
-        strides.append(acc)
-        acc *= d
-    strides.reverse()
-    # flat top-level modes: (tile..., kept rest...) — official profile
-    # convention for local_tile (size(mode=[3]) indexes loopK directly)
+            keep_stride.append(d)
+        else:
+            # A selected rest coordinate is a tile-coordinate displacement.
+            # Keep it symbolic so the backend can hoist/reuse the resulting
+            # pointer arithmetic without exposing it in kernel source.
+            origin.append((c, d))
     new_lay = Layout(tuple(_flatten(tile_shape)) + tuple(keep_shape),
-                     tuple(_flatten(tile_stride)) + tuple(strides))
-    nv = Tensor(tiled.base, new_lay, tiled.element, tiled.origin)
+                     tuple(_flatten(tile_stride)) + tuple(keep_stride))
+    nv = Tensor(tiled.base, new_lay, tiled.element, origin)
     nv.coord_offs = dict(getattr(tiled, "coord_offs", {}))
     nv.swizzle = getattr(tiled, "swizzle", None)
     return nv
@@ -754,6 +753,13 @@ class TiledMma:
     def make_fragment_B(self, view):
         return FragmentViewB(view)
 
+    def make_fragment_C(self, view):
+        """Allocate the per-thread accumulator in MMA C-value order."""
+        from .kernel_objects import Fragment
+        from .meta import F32
+
+        return Fragment(view.count, F32, name="tCrC")
+
 
 class MmaThreadSlice:
     def __init__(self, tiled_mma, tidx_ssa):
@@ -814,7 +820,13 @@ def _frag_atom_grid(part):
     tile = part.tile
     lay = tile.layout if hasattr(tile, "layout") else tile
     flat = _flatten(lay.shape)
-    k_ext = max(flat) if len(flat) >= 2 else ak   # (m,k)/(n,k): k is 2nd
+    # A is laid out (M,K), while B is (K,N).  The stage mode, when present,
+    # is never part of the MMA K extent.  The previous max(flat) shortcut
+    # accidentally treated A's M extent as K for tall tiles.
+    if getattr(part, "which", "A") == "B":
+        k_ext = flat[0] if flat else ak
+    else:
+        k_ext = flat[1] if len(flat) > 1 else ak
     mma_k = max(1, k_ext // ak)
     return warp_m // am, warp_n // an, mma_k
 
@@ -886,11 +898,43 @@ def _const_of(v):
 
 # ------------------------------------------------- r2s epilogue copies
 class TiledCopyCAtom:
-    """make_tiled_copy_C_atom(stmatrix_atom, tiled_mma)."""
+    """C-value copy atom tiled by an MMA.
+
+    The original API primarily uses this descriptor for an SMEM epilogue.  A
+    universal atom is also supported by the compatibility backend for the
+    direct SM86 epilogue, allowing the application to remain expressed as
+    ``cute.copy(tiled_copy_C, tCrC, tCgC)``.
+    """
 
     def __init__(self, atom, mma):
         self.atom = atom
         self.mma = mma
+        self.tidx = None
+
+    def get_slice(self, tidx):
+        self.tidx = tidx
+        return self
+
+    def partition_D(self, gC):
+        return MmaGmemView(self, gC)
+
+    def partition_S(self, sC):
+        return R2SSmemView(self, sC)
+
+    def retile(self, accumulators):
+        return accumulators
+
+
+class MmaGmemView:
+    """Global C view in the per-thread MMA accumulator order."""
+
+    def __init__(self, tc, tensor):
+        self.tc = tc
+        self.tensor = tensor
+
+    @property
+    def shape(self):
+        return self.tc.mma.tile_mn
 
 
 class TiledCopyR2S:

@@ -16,11 +16,50 @@ meta) skips tracing/compiling on repeated calls with identical shapes.
 """
 
 import inspect
+import shlex
 import textwrap
 from dataclasses import dataclass, field
 
 _DEBUG_BIND = False
 _compile_only = False
+_target_override = None
+
+
+def _normalize_target(value: str) -> str:
+    import re
+
+    if value.startswith("sm") and not value.startswith("sm_"):
+        value = "sm_" + value[2:]
+    if not re.fullmatch(r"sm_\d+[a-z]?", value):
+        raise ValueError(f"invalid --gpu-arch value {value!r}")
+    return value
+
+
+def _target_from_options(options) -> str | None:
+    if not options:
+        return None
+    if not isinstance(options, str):
+        raise TypeError("cute.compile options must be a string")
+    tokens = shlex.split(options)
+    for i, token in enumerate(tokens):
+        if token == "--gpu-arch":
+            if i + 1 >= len(tokens):
+                raise ValueError("--gpu-arch requires an architecture")
+            return _normalize_target(tokens[i + 1])
+        if token.startswith("--gpu-arch="):
+            return _normalize_target(token.split("=", 1)[1])
+    return None
+
+
+def _with_target(fn, args, target):
+    global _target_override
+    previous = _target_override
+    if target is not None:
+        _target_override = target
+    try:
+        return fn(*args)
+    finally:
+        _target_override = previous
 
 from ..compiler import compile_mlir_to_ptx, entry_names
 from ..runtime import DriverJit, LaunchManifest
@@ -222,7 +261,7 @@ class _CachedLaunch:
 
 
 class JitFunction:
-    def __init__(self, fn, _self=None):
+    def __init__(self, fn, _self=None, target="sm_120a"):
         self.fn = fn
         self.__name__ = fn.__name__
         self._name_prefix = ""
@@ -230,6 +269,7 @@ class JitFunction:
         self._cache: dict = {}
         self._has_self = getattr(self._params, "has_self", False)
         self._bound_self = _self
+        self.target = target
 
     def __get__(self, obj, objtype=None):
         if obj is None:
@@ -244,7 +284,7 @@ class JitFunction:
         cached = getattr(obj, slot, None)
         if cached is not None:
             return cached
-        bound = JitFunction(self.fn, _self=obj)
+        bound = JitFunction(self.fn, _self=obj, target=self.target)
         bound._name_prefix = self._name_prefix
         try:
             setattr(obj, slot, bound)
@@ -372,16 +412,19 @@ class JitFunction:
             args.append(self._params[len(args)].default)
 
         bound, key, tensors = self._bind(args, kwargs)
+        target = _target_override or self.target
+        key = (target,) + tuple(key)
         cached = self._cache.get(key)
 
         if cached is None:
             records = self._trace(bound, args)
             plans = []
             for rec in records:
-                ptx = compile_mlir_to_ptx(rec.emitter.module_text())
+                ptx = compile_mlir_to_ptx(
+                    rec.emitter.module_text(), target=target)
                 entries = entry_names(ptx)
                 assert entries, "no kernel entry in emitted PTX"
-                jit = DriverJit(ptx)
+                jit = DriverJit(ptx, target=target)
                 manifest = LaunchManifest(
                     entry=entries[0],
                     args=[{"name": name, "type": _abi_mlir_type(entry)}
@@ -389,6 +432,7 @@ class JitFunction:
                           for name in [entry[1]]],
                     grid=rec.grid,
                     block=rec.block,
+                    target=target,
                 )
                 manifest.uses_printf = rec.emitter.uses_printf
                 plans.append((jit, manifest, rec.abi, rec.tma_sources))
@@ -443,7 +487,9 @@ class JitFunction:
                 g = tuple(x(rt) if hasattr(x, "fn") else x for x in g)
                 manifest = LaunchManifest(entry=manifest.entry,
                                           args=manifest.args, grid=g,
-                                          block=manifest.block)
+                                          block=manifest.block,
+                                          target=manifest.target,
+                                          ptx_version=manifest.ptx_version)
                 manifest.uses_printf = rec_emitter_printf
             jit.launch(manifest, *vals)
             needs_sync = needs_sync or getattr(manifest, "uses_printf", False)
@@ -583,10 +629,16 @@ def _as_tensor_meta(v):
 
 
 def compile_function(fn, *args, **options):
-    """cute.compile(fn, *args, options=...) -> cached callable."""
+    """cute.compile(fn, *args, options=...) -> cached callable.
+
+    The official CuTe DSL selects the device architecture with the
+    ``--gpu-arch`` compile option.  Preserve that interface here while also
+    accepting the additive ``@cute.jit(target=...)`` spelling.
+    """
+    target = _target_from_options(options.get("options"))
     if isinstance(fn, JitFunction):
         fn._bind(args)  # prime specialization (compile on first call)
-        return fn
+        return _CompiledCallable(fn, args, target=target)
     if callable(fn):
         # Official compile accepts any callable (kernel objects whose
         # __call__ is typically @cute.jit). Semantics: compile-time args
@@ -603,16 +655,16 @@ def compile_function(fn, *args, **options):
             and not isinstance(getattr(value, "value", value), bool)
         }
         if any(param.kind == "pointer" for param in params) and forced_names:
-            return _DeferredCompiledCallable(fn, args, forced_names)
+            return _DeferredCompiledCallable(fn, args, forced_names, target=target)
 
         global _compile_only
         previous = _compile_only
         _compile_only = True
         try:
-            fn(*args)
+            _with_target(fn, args, target)
         finally:
             _compile_only = previous
-        return _CompiledCallable(fn, args)
+        return _CompiledCallable(fn, args, target=target)
     raise TypeError("cute.compile expects a callable")
 
 
@@ -620,9 +672,10 @@ class _CompiledCallable:
     """Post-cute.compile runner: later calls replace the tensor args of
     the priming signature, reusing captured constexpr scalars."""
 
-    def __init__(self, fn, prime_args):
+    def __init__(self, fn, prime_args, target=None):
         self._fn = fn
         self._prime = list(prime_args)
+        self._target = target
 
     @staticmethod
     def _is_stream(value):
@@ -690,21 +743,21 @@ class _CompiledCallable:
         return merged
 
     def __call__(self, *dyn_args):
-        return self._fn(*self._merge(dyn_args))
+        return _with_target(self._fn, tuple(self._merge(dyn_args)), self._target)
 
 
 class _DeferredCompiledCallable(_CompiledCallable):
     """Pointer-based wrapper specialized after runtime layout sizes arrive."""
 
-    def __init__(self, fn, prime_args, forced_names):
-        super().__init__(fn, prime_args)
+    def __init__(self, fn, prime_args, forced_names, target=None):
+        super().__init__(fn, prime_args, target=target)
         self._forced_names = frozenset(forced_names)
 
     def __call__(self, *dyn_args):
         merged = self._merge(dyn_args)
         bound_call = getattr(self._fn, "__call__")
         bound_call._forced_constexpr_names = self._forced_names
-        return bound_call(*merged)
+        return _with_target(bound_call, tuple(merged), self._target)
 
 
 # trace state (single-threaded)

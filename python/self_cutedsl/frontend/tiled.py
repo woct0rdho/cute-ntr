@@ -55,8 +55,13 @@ class TiledCopy:
     def get_slice(self, tidx) -> "ThreadSlice":
         from . import builtins as _b
 
-        _b._active.tidx_ssa = tidx  # remember for partition math
+        if _b._active is not None:
+            _b._active.tidx_ssa = tidx  # remember for partition math
         return ThreadSlice(self, tidx)
+
+    def retile(self, fragment):
+        """Re-express a fragment in this tiled copy's value order."""
+        return fragment
 
 
 class ThreadSlice:

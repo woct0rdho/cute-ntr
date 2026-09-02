@@ -107,10 +107,6 @@ class Tile:
     """Annotation marker: compile-time tile meta parameter."""
 
 
-class Shape:
-    pass
-
-
 class Swizzle:
     pass
 
@@ -233,8 +229,11 @@ def make_tiled_copy_S(atom, tiled_copy_c):
 
 
 def make_tiled_copy(atom, thr_layout, val_shape=None):
-    """cute.make_tiled_copy(atom, TV-layout, val-shape): SF smem->rmem copy
-    descriptor; lowered at the copy site from the SF trait geometry."""
+    """Create a tiled copy using either the TV or MMA-C compatibility form.
+
+    The three-argument TV form is the public CuTe spelling.  The two-argument
+    form remains available for the existing structured-copy extensions.
+    """
     from cutlass.cute._fi_copy import _CpAsyncAtom, _UniversalAtom, TVCopyAsync
     if isinstance(atom, _CpAsyncAtom):
         return TVCopyAsync(atom, thr_layout, val_shape)
@@ -300,26 +299,76 @@ def make_tiled_copy_B(atom, tiled_mma):
 
 
 def make_tiled_copy_tv(atom, thr_layout, val_layout):
+    """Create the official TV tiled-copy descriptor.
+
+    cp.async atoms use the richer compatibility descriptor from ``_fi_copy``;
+    its partitioned views can select the SM86 matrix staging backend when the
+    caller supplies the operand metadata.  Universal atoms retain the generic
+    frontend implementation.
+    """
+    from cutlass.cute._fi_copy import _CpAsyncAtom, TVCopyAsync
     from self_cutedsl.frontend import builtins
 
+    if isinstance(atom, _CpAsyncAtom):
+        return TVCopyAsync(atom, thr_layout, val_layout)
     return builtins.make_tiled_copy_tv(atom, thr_layout, val_layout)
+
+
+def cp_async_copy(src, dst, operand, kt, tile_m, tile_n, tile_k,
+                   block_m, block_n, stride_a, stride_b, stage, threads=512,
+                   smem_stride_a=None, smem_stride_b=None, swizzle_bits=0):
+    """Issue an aligned SM86 global-to-shared cp.async tile transaction set."""
+    from cutlass.cute._fi_copy import copy_linear_cpasync
+
+    copy_linear_cpasync(src, dst, operand, kt, tile_m, tile_n, tile_k,
+                        block_m, block_n, stride_a, stride_b, stage, threads,
+                        smem_stride_a, smem_stride_b, swizzle_bits)
+
+
+def cp_async_commit_group():
+    from cutlass.cute._fi_copy import cp_async_commit_group as _commit
+
+    _commit()
+
+
+def cp_async_wait_group(count=0):
+    from cutlass.cute._fi_copy import cp_async_wait_group as _wait
+
+    _wait(count)
 
 
 def copy(atom, src, dst, pred=None, **kw):
     from self_cutedsl.frontend import builtins
     from self_cutedsl.frontend.cute_objects import TiledCopyAB, TmaAtom
 
-    from self_cutedsl.frontend.cute_objects import TiledCopyR2S
+    from self_cutedsl.frontend.cute_objects import (
+        TiledCopyCAtom,
+        TiledCopyR2S,
+    )
 
     from cutlass.cute._fi_copy import (
         _CpAsyncAtom,
         _UniversalAtom,
+        TVCopyAsync,
         copy_cpasync,
         copy_universal,
     )
     if isinstance(atom, _CpAsyncAtom):
         copy_cpasync(atom, src, dst, pred)
         return
+    if isinstance(atom, TVCopyAsync):
+        # The atom owns the same descriptor that produced the partitioned
+        # views.  Matrix views select the SM86 backend; ordinary TV views keep
+        # the existing elementwise cp.async implementation.
+        copy_cpasync(atom.atom, src, dst, pred)
+        return
+    if isinstance(atom, TiledCopyCAtom):
+        from self_cutedsl.frontend import builtins
+        from self_cutedsl.frontend.cute_objects import MmaGmemView
+
+        if isinstance(dst, MmaGmemView):
+            builtins.copy_mma_to_gmem(atom, src, dst)
+            return
     from self_cutedsl.frontend.kernel_objects import Fragment, ThrPartition
 
     if isinstance(atom, _UniversalAtom) and (
@@ -646,10 +695,12 @@ def make_smem_array(name, count, element=None):
     return builtins.make_smem_array(name, count, element)
 
 
-def ldmatrix(smem, row_ssa, col_elems=0, num=4, trans=False):
+def ldmatrix(smem, row_ssa, col_elems=0, num=4, trans=False,
+             swizzle_bits=0):
     from self_cutedsl.frontend import builtins
 
-    return builtins.ldmatrix(smem, row_ssa, col_elems, num, trans)
+    return builtins.ldmatrix(smem, row_ssa, col_elems, num, trans,
+                             swizzle_bits)
 
 
 def make_tiled_mma(atom, atom_layout=None, permutation_mnk=None):
@@ -689,15 +740,6 @@ def gemm(tiled_mma, acc, a_frag, b_frag, *rest):
     from self_cutedsl.frontend import builtins
     from self_cutedsl.frontend.cute_objects import FragK
 
-    import os as _os
-    if _os.environ.get("DG_GEMM_DEBUG"):
-        import sys as _s
-        print(f"DBG gemm: a={type(a_frag).__name__} "
-              f"list={isinstance(a_frag, (list, tuple))} "
-              f"len={len(a_frag) if isinstance(a_frag, (list, tuple)) else '-'} "
-              f"e1={type(a_frag[1]).__name__ if isinstance(a_frag, (list, tuple)) and len(a_frag) > 1 else '-'} "
-              f"sv={hasattr(a_frag[1], 'smem_view') if isinstance(a_frag, (list, tuple)) and len(a_frag) > 1 else '-'}",
-              file=_s.stderr)
     if isinstance(a_frag, (list, tuple)) and len(a_frag) == 2 \
             and hasattr(a_frag[1], "smem_view"):   # block-scaled [data, SF]
         builtins.gemm_bs(tiled_mma, acc, a_frag, b_frag)
@@ -1011,38 +1053,53 @@ def make_rmem_tensor(shape, dtype):
 
 
 def local_tile(m, tiler, coord):
-    """local_tile(mA, (M,K), (None,None,None)): pad 2-mode operand metas
-    with the implicit L=1 mode so the result carries (tile..., loopM,
-    loopK/loopN, loopL) flat modes like the official profile."""
+    """Return a first-class layout-derived local tile.
+
+    Kernel tensor parameters are rebound to a host-side ``cute.Tensor`` view
+    during device tracing.  Preserve the original strides and record selected
+    rest coordinates as symbolic element offsets; this is the object-model
+    equivalent of the official ``local_tile`` operation and is consumed by
+    partitioned copy/MMA backends.
+    """
     from self_cutedsl.frontend import cute_objects as co
     from self_cutedsl.frontend.cute_objects import Tensor as HT, Layout
 
-    base = m if hasattr(m, "layout") else m
+    base = m
     coord = tuple(coord)
     if base.__class__.__name__ == "CoordinateTensorMeta":
         from cutlass.cute._fi_copy import CoordTile
-
         return CoordTile(base, tiler, coord)
-    if isinstance(base, HT):
-        lay = base.layout
-    else:
+    if not isinstance(base, HT):
         from self_cutedsl.frontend.kernel_objects import KernelTensor
+        if not isinstance(base, KernelTensor):
+            raise TypeError(f"local_tile on {type(base)}")
+        source = getattr(base.meta, "layout", None)
+        if source is None:
+            source = Layout(tuple(base.shape),
+                           tuple(getattr(base.meta, "stride", ()) or
+                                 _row_major_stride(base.shape)))
+        base = HT(base.ptr, source, base.element_type)
+    flat_s = tuple(int(v) for v in co._flatten(base.layout.shape))
+    flat_d = tuple(int(v) for v in co._flatten(base.layout.stride))
+    tile = tuple(int(v) for v in co._flatten(tiler))
+    if len(tile) > len(flat_s):
+        raise ValueError("local_tile tiler rank exceeds tensor rank")
+    origin = list(getattr(base, "origin", ()))
+    for axis, value in enumerate(coord[:len(tile)]):
+        if value is not None:
+            origin.append((value, tile[axis] * flat_d[axis]))
+    tile_strides = flat_d[:len(tile)]
+    return HT(base.base, Layout(tile, tile_strides), base.element,
+              origin=origin)
 
-        assert isinstance(base, KernelTensor), f"local_tile on {type(base)}"
-        shp = tuple(base.shape)
-        strd = tuple(getattr(base.meta, "stride", (1,) * len(shp)) or
-                     (1,) * len(shp))
-        lay = Layout(shp, strd)
-        base = HT(base.ptr, lay, getattr(base.meta, "element_type", None))
-    flat_s = list(co._flatten(lay.shape))
-    flat_d = list(co._flatten(lay.stride))
-    if len(flat_s) == 2 and len(coord) == 3:
-        flat_s.append(1)
-        flat_d.append(flat_s[0] * flat_d[0])
-        base = HT(base.base, Layout(tuple(flat_s), tuple(flat_d)),
-                  base.element, getattr(base, "origin", None))
-    tiled = co.zipped_divide(base, tiler)
-    return co._select_rest(tiled, coord)
+
+def _row_major_stride(shape):
+    flat = [int(v) for v in shape]
+    strides, acc = [], 1
+    for dim in reversed(flat):
+        strides.append(acc)
+        acc *= dim
+    return tuple(reversed(strides))
 
 
 # NOTE: an earlier revision of this file carried a second `zipped_divide`
