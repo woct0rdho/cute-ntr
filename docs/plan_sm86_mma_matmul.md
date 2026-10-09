@@ -1,6 +1,6 @@
 # Plan: Idiomatic CuTe DSL and SM86 Matmul Refactor
 
-**Status:** execution complete; final fulfillment review recorded below.
+Status: execution complete; final fulfillment review recorded below.
 
 ## 1. Goal and non-negotiable constraints
 
@@ -149,7 +149,7 @@ current validated measurements; improvements should be retained and recorded.
 - this plan updated with completed stages, test commands, measurements, and
   limitations;
 - a final fulfillment review as the last work step, explicitly checking each
-  goal and marking it **fulfilled**, **partially fulfilled**, or **blocked**.
+  goal and marking it fulfilled, partially fulfilled, or blocked.
 
 ## 6. Final fulfillment review
 
@@ -158,50 +158,50 @@ benchmarks.
 
 ### Source-model and kernel review
 
-- **Fulfilled - idiomatic SM86 application source.** The host JIT constructs
+- Fulfilled - idiomatic SM86 application source. The host JIT constructs
   layouts, tensors, copy atoms, tiled copies, and tiled MMA objects. The kernel
   uses `cute.local_tile`, `get_slice`, `partition_A/B/C`,
   `make_fragment_A/B/C`, `cute.copy`, and `cute.gemm`.
-- **Fulfilled - application/backend separation.** The final source audit found
+- Fulfilled - application/backend separation. The final source audit found
   no calls to `cp_async_copy`, `ldmatrix`, `mma.sync`, or manual lane-to-register
   mapping in `tests/runtime/sm86/sm86_matmul.py`. Ampere instruction lowering
   and the calibrated lane/register traits remain in the compatibility backend.
-- **Fulfilled - correctness gates.** FP32 and FP16 output paths pass the SM86
+- Fulfilled - correctness gates. FP32 and FP16 output paths pass the SM86
   numerical tests, including K=16, K=32, and K=64. The K=64 staged path now
   uses the physical shared-memory stage stride, including row padding.
-- **Partially fulfilled - pipeline abstraction.** The two-stage pipeline and
+- Partially fulfilled - pipeline abstraction. The two-stage pipeline and
   validated `cp.async` schedule remain correct, but commit/wait operations are
   still explicit `cute.cp_async_*` calls rather than a separate structured
   pipeline object.
 
 ### Compatibility review
 
-- **Fulfilled for the supported surface - layout/tensor algebra.** Shape and
+- Fulfilled for the supported surface - layout/tensor algebra. Shape and
   stride preservation, `cosize`, slicing, rebinding, staged views, and dynamic
   `local_tile` origins are covered by the existing algebra tests and the new
   `tests/python/test_cute_compat_surface.py` checks.
-- **Fulfilled for the supported surface - copy/MMA relationships.** Universal
+- Fulfilled for the supported surface - copy/MMA relationships. Universal
   and cp.async atom construction, cache-mode spelling, tiled-copy slices,
   `retile`, MMA tiling, fragment allocation, and C epilogue partitioning are
   represented by compatibility objects and focused tests.
-- **Partially fulfilled - exact original-package compatibility.** This remains
+- Partially fulfilled - exact original-package compatibility. This remains
   a targeted compatibility implementation, not the complete CUTLASS CuTe API.
   Unsupported or incomplete areas include broad TMA/bulk-copy variants,
   complete architecture-specific atom trait validation, edge-masked SM86
   copies, and every original failure-mode/signature combination. These are
   intentionally outside this milestone's supported surface.
-- **Partially fulfilled - conformance breadth.** The supported examples and
+- Partially fulfilled - conformance breadth. The supported examples and
   representative object relationships are covered, but exhaustive differential
   testing against every original overload was not added.
 
 ### Validation evidence
 
-- `python -m py_compile` on all changed Python files: **passed**.
-- `git diff --check`: **passed**.
+- `python -m py_compile` on all changed Python files: passed.
+- `git diff --check`: passed.
 - `pytest tests/python/test_sm86_target.py
-  tests/python/test_cute_compat_surface.py -q`: **6 passed**.
-- `pytest -m "not sm120 and not sm86" -q`: **192 passed, 87 deselected**.
-- `pytest -m sm86 -q -s`: **11 passed, 268 deselected** on the RTX 3080 Ti
+  tests/python/test_cute_compat_surface.py -q`: 6 passed.
+- `pytest -m "not sm120 and not sm86" -q`: 192 passed, 87 deselected.
+- `pytest -m sm86 -q -s`: 11 passed, 268 deselected on the RTX 3080 Ti
   Laptop (compute capability 8.6).
 - Final PTX audit over three generated SM86 modules: all contained `.target
   sm_86`, `cp.async.ca.shared.global`, `ldmatrix`, and
@@ -229,16 +229,16 @@ Representative rectangular results are in
 `4096x1024x1024` measured 2005.50 us versus 1898.50 us. The latter capture
 ran at a sustained 210 MHz SM clock, and the former included a later
 low-clock outlier; neither is a controlled before/after comparison. Therefore
-**performance is partially fulfilled**: the like-for-like square capture shows
+performance is partially fulfilled: the like-for-like square capture shows
 no measured regression, but parity for all rectangular cases is not claimed.
 
 ### Final classification
 
-- **Fulfilled:** idiomatic source constructs, backend separation, SM86
+- Fulfilled: idiomatic source constructs, backend separation, SM86
   correctness, target selection, PTX instruction generation, and the tested
   supported compatibility surface.
-- **Partially fulfilled:** complete original CuTe API coverage, structured
+- Partially fulfilled: complete original CuTe API coverage, structured
   pipeline abstraction, exhaustive conformance/failure-mode coverage, and
   performance parity under all rectangular/clock conditions.
-- **Blocked by scope/environment:** exact full-package compatibility and
+- Blocked by scope/environment: exact full-package compatibility and
   SM120 device validation on the available SM86 GPU.
