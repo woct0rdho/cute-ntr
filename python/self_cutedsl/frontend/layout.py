@@ -1,4 +1,4 @@
-"""layout.py — host-side CuTe layout meta-objects bound to the public cute dialect.
+"""layout.py - host-side CuTe layout meta-objects bound to the public cute dialect.
 
 A CuteLayout serializes to MLIR (cute.make_shape/make_stride/make_layout),
 which `cute-opt -cute-fold-static` folds; our Python reference evaluator

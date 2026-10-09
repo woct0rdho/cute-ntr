@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""capture_reference.py — freeze official-environment baseline evidence (M0).
+"""capture_reference.py - freeze official-environment baseline evidence (M0).
 
 Runs each case from the reference manifest in the OFFICIAL environment
 (.venv-reference with nvidia-cutlass-dsl installed), records versions,

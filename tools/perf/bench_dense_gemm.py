@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""bench_dense_gemm.py — official blackwell_geforce dense_gemm.py (FP16)
+"""bench_dense_gemm.py - official blackwell_geforce dense_gemm.py (FP16)
 performance, verbatim operator source, dual-stack.
 
-Imports the UNMODIFIED demo module and drives its own ``testing.benchmark``
-harness (CUDA events, returns µs/iteration). ``skip_ref_check=True``: this is
+Imports the UNMODIFIED demo module and drives its own `testing.benchmark`
+harness (CUDA events, returns µs/iteration). `skip_ref_check=True`: this is
 performance only; golden verification lives in
 tests/python/test_dense_gemm_verbatim.py.
 

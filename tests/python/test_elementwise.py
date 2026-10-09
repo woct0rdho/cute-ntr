@@ -1,4 +1,4 @@
-"""M2: dynamic for-loop + tensor pointer ABI — grid-stride elementwise add.
+"""M2: dynamic for-loop + tensor pointer ABI - grid-stride elementwise add.
 
 Uses the same two-decorator pattern as the official elementwise examples,
 with dynamic M/N kernel args and boundary predication.

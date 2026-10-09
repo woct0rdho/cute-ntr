@@ -17,7 +17,7 @@ from cutlass.cute._fi_ext import Pointer, ReductionOp, TensorSSA  # noqa: F401
 # cpasync atom
 # ---------------------------------------------------------------------------
 class CopyG2SOp:
-    """cute.nvgpu.cpasync.CopyG2SOp — 16B cp.async global->shared."""
+    """cute.nvgpu.cpasync.CopyG2SOp - 16B cp.async global->shared."""
 
     def __init__(self, cache_mode=None, **kwargs):
         self.cache_mode = cache_mode
@@ -54,7 +54,7 @@ def make_copy_atom(op, elem=None, num_bits_per_copy=None, **kw):
 
 
 class TVCopyAsync:
-    """make_tiled_copy(cpasync_atom, tv_layout, tiler_mn) — get_slice /
+    """make_tiled_copy(cpasync_atom, tv_layout, tiler_mn) - get_slice /
     partition_S / partition_D produce per-thread coordinate views."""
 
     def __init__(self, atom, tv_layout, tiler_mn):
@@ -119,7 +119,7 @@ class TVPartView:
 
     def coord(self, j):
         """Tile (row, col) for value-unit j of the bound thread (constexpr
-        j only — the kernels iterate value units at trace time)."""
+        j only - the kernels iterate value units at trace time)."""
         e = _emitter()
         T, _, V, _ = self._geom
         t, r = self.thread_base()
@@ -195,6 +195,145 @@ class _TVUnit:
 
 
 # ---------------------------------------------------------------------------
+# universal (non-async) TV tiled copy
+# ---------------------------------------------------------------------------
+
+class TVCopyUniversal:
+    """`make_tiled_copy_tv(universal_atom, thr_layout, val_layout)`.
+
+    Supported directions:
+
+    `rmem -> gmem`   fragment values written straight to global memory
+                       (scalar stores; used where no smem staging exists);
+    `smem -> gmem`   a tile staged in shared memory written out with one
+                       contiguous `val_layout`-sized vector per thread
+                       (the attention/GEMM epilogue: 16 B per thread per
+                       row band instead of 2 B per element).
+    """
+
+    def __init__(self, atom, thr_layout, val_layout):
+        self.atom = atom
+        self.thr_layout = thr_layout
+        self.val_layout = val_layout
+        self.tidx = None
+
+    def get_slice(self, tidx):
+        self.tidx = tidx
+        return self
+
+    def partition_S(self, tensor):
+        return TVTileView(self, tensor, "S")
+
+    def partition_D(self, tensor):
+        return TVTileView(self, tensor, "D")
+
+    def retile(self, fragment):
+        return fragment
+
+
+class TVTileView:
+    """Per-thread view of a tile for a :class:`TVCopyUniversal` copy."""
+
+    def __init__(self, tc, tensor, role):
+        self.tc = tc
+        self.tensor = tensor
+        self.role = role
+
+    def __getitem__(self, idx):
+        return self
+
+    def __repr__(self):
+        return f"<TVTileView {self.role} of {type(self.tensor).__name__}>"
+
+
+def _flatten(x):
+    from self_cutedsl.frontend.cute_objects import _flatten as _f
+
+    return tuple(int(v) for v in _f(x))
+
+
+def _flat_layout(layout):
+    return (tuple(int(v) for v in _flatten(layout.shape)),
+            tuple(int(v) for v in _flatten(layout.stride)))
+
+
+def is_smem_tensor(tensor) -> bool:
+    base = getattr(tensor, "base", None)
+    return base is not None and hasattr(base, "ptr") and \
+        hasattr(base, "count") and getattr(base, "elem", None) is not None
+
+
+def copy_tile_s2g(src_view, dst_view):
+    """Vectorized shared-memory tile -> global tile store.
+
+    Each thread owns `val_layout` contiguous elements of one row: with the
+    attention epilogue layouts that is 8 FP16 (16 B) per thread, so the
+    resulting global stores are `STG.E.128` and every 32 B sector carries
+    data from exactly two threads instead of from sixteen.
+    """
+    e = _emitter()
+    sX = src_view.tensor
+    gX = dst_view.tensor
+    tc = src_view.tc
+    thr_shape, _ = _flat_layout(tc.thr_layout)
+    val_shape, _ = _flat_layout(tc.val_layout)
+    extra = _flatten_extra(thr_shape)
+    rows_per_tile = int(thr_shape[0]) * int(val_shape[0])
+    cols_per_tile = int(thr_shape[1]) * int(val_shape[1])
+    vec = int(val_shape[1])
+
+    tile_shape = [int(v) for v in _flatten(sX.layout.shape)]
+    tile_rows, tile_cols = tile_shape[0], tile_shape[1]
+    row_blocks = max(1, tile_rows // rows_per_tile)
+    col_blocks = max(1, tile_cols // cols_per_tile)
+
+    s_stride, _ = _tensor_strides(sX)
+    g_stride, _ = _tensor_strides(gX)
+    g_origin = _index_offset(e, getattr(gX, "origin", ()))
+    s_bits = _swizzle_bits(getattr(sX, "swizzle", None))
+    s_swizzle = bool(s_bits)
+
+    tid = e.thread_id("x")
+    T0 = e.idx_const(int(thr_shape[0]))
+    row_in_tile = e.idx_binop("arith.remsi", tid, T0)
+    col_group = e.idx_binop("arith.divsi", tid, T0)
+    col_base = e.idx_binop(
+        "arith.muli", col_group, e.idx_const(int(val_shape[1])))
+
+    for rb in range(row_blocks):
+        row = row_in_tile if rb == 0 else e.idx_binop(
+            "arith.addi", row_in_tile,
+            e.idx_const(rb * rows_per_tile))
+        for cb in range(col_blocks):
+            col = col_base if cb == 0 else e.idx_binop(
+                "arith.addi", col_base, e.idx_const(cb * cols_per_tile))
+            soff = e.idx_binop("arith.muli", row, e.idx_const(s_stride))
+            if s_swizzle:
+                # the swizzle permutes whole 16 B chunks inside a row, so a
+                # contiguous per-thread vector stays contiguous
+                phys = _swizzle_128b_row_col(
+                    e, row, col, s_stride, s_bits)
+                soff = phys
+            else:
+                soff = e.idx_binop("arith.addi", soff, col)
+            sp = e.gep_smem(sX.base.ptr, soff)
+            values = e.ssa(
+                f"vector<{vec}xf16>",
+                f"llvm.load {sp.name} {{alignment = {vec * 2} : i64}} "
+                f": !llvm.ptr<3> -> vector<{vec}xf16>")
+            goff = e.idx_binop(
+                "arith.addi", g_origin,
+                e.idx_binop("arith.addi",
+                            e.idx_binop("arith.muli", row,
+                                        e.idx_const(g_stride)),
+                            col))
+            gp = _gep_gmem(e, gX, goff)
+            e.raw(f"llvm.store {values.name}, {gp.name} "
+                  f"{{alignment = {vec * 2} : i64}} "
+                  f": vector<{vec}xf16>, !llvm.ptr<1>")
+
+
+# ---------------------------------------------------------------------------
 # copy() lowering: cp.async per 16B block with predicate
 # ---------------------------------------------------------------------------
 
@@ -208,7 +347,7 @@ def _is_matrix_view(src, dst):
 
 
 def _index_offset(e, terms):
-    """Materialize ``sum(coord * stride)`` as an index SSA value."""
+    """Materialize `sum(coord * stride)` as an index SSA value."""
     total = e.idx_const(0)
     for coord, stride in terms:
         value = coord
@@ -234,11 +373,57 @@ def _stage_offset(e, view, stage_stride):
     return e.idx_binop("arith.muli", value, int(stage_stride))
 
 
+def _swizzle_128b_f16(e, offset):
+    """Apply CuTe's S<3,4,3> to a shared-memory f16 offset."""
+    offset32 = e.ssa(
+        "i32", f"arith.index_cast {offset.name} : index to i32")
+    shift6 = e.ssa("i32", "arith.constant 6 : i32")
+    mask = e.ssa("i32", "arith.constant 7 : i32")
+    shift3 = e.ssa("i32", "arith.constant 3 : i32")
+    row_bits = e.ssa("i32", f"arith.shrui {offset32.name}, "
+                     f"{shift6.name} : i32")
+    row_bits = e.ssa("i32", f"arith.andi {row_bits.name}, "
+                     f"{mask.name} : i32")
+    xor_bits = e.ssa("i32", f"arith.shli {row_bits.name}, "
+                     f"{shift3.name} : i32")
+    physical = e.ssa("i32", f"arith.xori {offset32.name}, "
+                     f"{xor_bits.name} : i32")
+    return e.ssa(
+        "index", f"arith.index_cast {physical.name} : i32 to index")
+
+
+def _swizzle_bits(swizzle):
+    """`B` of a `Swizzle<B,4,3>` smem swizzle (3 or 4), else 0."""
+    if getattr(swizzle, "m", None) != 4 or getattr(swizzle, "s", None) != 3:
+        return 0
+    bits = int(getattr(swizzle, "b", 0) or 0)
+    return bits if bits in (3, 4) else 0
+
+
+def _is_swizzle_128b(swizzle):
+    return _swizzle_bits(swizzle) == 3
+
+
+def _swizzle_128b_row_col(e, row, col, row_stride, bits: int = 3):
+    """`S<B,4,3>` for a row of `8 << bits` half elements."""
+    mask = e.idx_const((1 << int(bits)) - 1)
+    shift = e.idx_const(3)
+    row_low = e.ssa("index", f"arith.andi {row.name}, "
+                     f"{mask.name} : index")
+    xor_bits = e.ssa("index", f"arith.shli {row_low.name}, "
+                      f"{shift.name} : index")
+    physical_col = e.ssa("index", f"arith.xori {col.name}, "
+                          f"{xor_bits.name} : index")
+    return e.idx_binop(
+        "arith.addi", e.idx_binop("arith.muli", row, row_stride),
+        physical_col)
+
+
 def copy_matrix_cpasync(src_view, dst_view):
     """Emit the validated 16-byte SM86 matrix staging transactions.
 
     The layout-derived source origin and destination stage replace the former
-    kernel-level ``block_m/block_n/kt`` offset expressions.  Request ownership
+    kernel-level `block_m/block_n/kt` offset expressions.  Request ownership
     is intentionally unchanged: this preserves the measured two-round
     64x64/64x128 schedule and its register/resource behavior.
     """
@@ -254,6 +439,7 @@ def copy_matrix_cpasync(src_view, dst_view):
     operand = getattr(src_view.tc, "operand", None)
     if operand is None:
         operand = "A" if src_shape[0] >= src_shape[1] else "B"
+    transpose_src = bool(getattr(src_view.tc, "transpose_src", False))
     if operand == "A":
         tile_m, tile_k, minor = src_shape[0], src_shape[1], src_shape[1]
         smem_stride = dst_shape[1]
@@ -262,20 +448,80 @@ def copy_matrix_cpasync(src_view, dst_view):
         tile_k, tile_n, minor = src_shape[0], src_shape[1], src_shape[1]
         smem_stride = dst_shape[1]
         stage_elems = tile_k * smem_stride
+    elif operand == "B_T":
+        # K is stored globally as (sequence, head_dim), while QK MMA wants
+        # B in (head_dim, sequence) order.  Each request remains contiguous
+        # in global memory (one sequence row); only its shared destination is
+        # transposed.  This is the same logical operation as the Ampere
+        # CuTe copy atom, expressed in the compatibility descriptor.
+        if not transpose_src:
+            raise ValueError("B_T matrix copy requires transpose_src=True")
+        tile_n, tile_k = src_shape[0], src_shape[1]
+        minor = src_shape[1]
+        smem_stride = dst_shape[1]
+        stage_elems = dst_shape[0] * smem_stride
     else:
         raise ValueError(f"unknown matrix cp.async operand {operand!r}")
-    if tuple(dst_shape[:2]) != tuple(src_shape[:2]):
+    if not transpose_src and tuple(dst_shape[:2]) != tuple(src_shape[:2]):
         raise ValueError("source and destination tile shapes must match")
     src_stride = tuple(int(v) for v in _flatten(src.layout.stride))
     dst_stride = tuple(int(v) for v in _flatten(dst.layout.stride))
     src_origin = _index_offset(e, getattr(src, "origin", ()))
     stage_stride = dst_stride[2] if len(dst_stride) > 2 else stage_elems
     stage_origin = _stage_offset(e, dst_view, stage_stride)
+    dst_swizzle_bits = _swizzle_bits(getattr(dst, "swizzle", None))
+    use_dst_swizzle = bool(dst_swizzle_bits)
     tile_elems = tile_m * tile_k if operand == "A" else tile_k * tile_n
     requests = tile_elems // 8
     threads = int(getattr(src_view.tc, "threads", 32 * 2 * 4))
     rounds = (requests + threads - 1) // threads
     tid = e.thread_id("x")
+    if transpose_src:
+        # cp.async cannot transpose a 16-byte payload. K is therefore loaded
+        # as contiguous rows and written as individual halves to the
+        # transposed shared tile consumed by ldmatrix B.
+        for request_round in range(rounds):
+            remaining = requests - request_round * threads
+            active_count = min(threads, remaining)
+            active = e.ssa("i1", f"arith.cmpi slt, {tid.name}, "
+                            f"{e.idx_const(active_count).name} : index")
+            e.open_if(active)
+            request_base = e.idx_binop(
+                "arith.addi", e.idx_binop(
+                    "arith.muli", tid, 8), request_round * threads * 8)
+            row = e.idx_binop("arith.divsi", request_base, minor)
+            col0 = e.idx_binop("arith.remsi", request_base, minor)
+            goff = e.idx_binop(
+                "arith.addi", src_origin,
+                e.idx_binop("arith.addi", e.idx_binop(
+                    "arith.muli", row, src_stride[0]),
+                    e.idx_binop("arith.muli", col0, src_stride[1])))
+            gp = e.gep(src.base, goff, "f16")
+            values = e.ssa(
+                "vector<8xf16>", f"llvm.load {gp.name} "
+                "{alignment = 16 : i64} : !llvm.ptr<1> -> vector<8xf16>")
+            for item in range(8):
+                col = e.idx_binop("arith.addi", col0, item)
+                if use_dst_swizzle:
+                    logical = _swizzle_128b_row_col(
+                        e, col, row, dst_stride[0], dst_swizzle_bits)
+                    soff = e.idx_binop("arith.addi", stage_origin,
+                                       logical)
+                else:
+                    soff = e.idx_binop(
+                        "arith.addi", stage_origin,
+                        e.idx_binop("arith.addi", e.idx_binop(
+                            "arith.muli", col, dst_stride[0]),
+                            e.idx_binop("arith.muli", row, dst_stride[1])))
+                sp = e.gep_smem(dst.base.ptr, soff, "f16")
+                lane = e.ssa("i32", f"arith.constant {item} : i32")
+                value = e.ssa(
+                    "f16", f"llvm.extractelement {values.name}"
+                    f"[{lane.name} : i32] : vector<8xf16>")
+                e.raw(f"llvm.store {value.name}, {sp.name} : "
+                       "f16, !llvm.ptr<3>")
+            e.close_if()
+        return
     for request_round in range(rounds):
         remaining = requests - request_round * threads
         active_count = min(threads, remaining)
@@ -291,11 +537,16 @@ def copy_matrix_cpasync(src_view, dst_view):
             e.idx_binop("arith.addi", e.idx_binop(
                 "arith.muli", row, src_stride[0]),
                 e.idx_binop("arith.muli", col, src_stride[1])))
-        soff = e.idx_binop(
-            "arith.addi", stage_origin,
-            e.idx_binop("arith.addi", e.idx_binop(
-                "arith.muli", row, dst_stride[0]),
-                e.idx_binop("arith.muli", col, dst_stride[1])))
+        if use_dst_swizzle:
+            logical = _swizzle_128b_row_col(
+                e, row, col, dst_stride[0], dst_swizzle_bits)
+            soff = e.idx_binop("arith.addi", stage_origin, logical)
+        else:
+            soff = e.idx_binop(
+                "arith.addi", stage_origin,
+                e.idx_binop("arith.addi", e.idx_binop(
+                    "arith.muli", row, dst_stride[0]),
+                    e.idx_binop("arith.muli", col, dst_stride[1])))
         gp = e.gep(src.base, goff, "f16")
         sp = e.gep_smem(dst.base.ptr, soff)
         e.raw('nvvm.inline_ptx "cp.async.ca.shared.global [$1], [$0], 16;" '
@@ -306,7 +557,7 @@ def copy_matrix_cpasync(src_view, dst_view):
 def copy_cpasync(atom, tXgX, tXsX, pred):
     """Lower a canonical cp.async tiled copy.
 
-    Matrix views produced by ``cute.local_tile`` use the SM86 matrix backend;
+    Matrix views produced by `cute.local_tile` use the SM86 matrix backend;
     the original TV path below remains the implementation for elementwise and
     predicated copies.  Both paths are selected from the partitioned view, so
     application kernels do not expose raw pointer arithmetic.
@@ -362,6 +613,25 @@ def copy_cpasync(atom, tXgX, tXsX, pred):
         e.raw(f'nvvm.inline_ptx "cp.async.cg.shared.global [$1], [$0], {bytes_per};" '
               f'ro ({gp.name}, {sp.name} : !llvm.ptr<1>, !llvm.ptr<3>)')
         e.close_if()
+
+
+def copy_tv_universal(atom, src, dst, pred):
+    """Dispatch for :class:`TVCopyUniversal` copies."""
+    src_tensor = getattr(src, "tensor", None)
+    dst_tensor = getattr(dst, "tensor", None)
+    if isinstance(src, TVTileView) and isinstance(dst, TVTileView) \
+            and is_smem_tensor(src_tensor) and not is_smem_tensor(dst_tensor):
+        if pred is not None:
+            raise NotImplementedError(
+                "predicated smem->gmem tile stores are not implemented")
+        copy_tile_s2g(src, dst)
+        return
+    return copy_universal(atom, src, dst, pred)
+
+
+def _flatten_extra(flat):
+    """Trailing TV modes beyond (thread-row, thread-col)."""
+    return tuple(int(v) for v in flat[2:])
 
 
 def copy_universal(atom, src, dst, pred):

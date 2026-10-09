@@ -1,4 +1,4 @@
-"""object_model/tma.py — generalized TMA atom/partition over the builtins.
+"""object_model/tma.py - generalized TMA atom/partition over the builtins.
 
 S3 changes vs the M6 builtins path:
   * tma_issue accepts FULLY DYNAMIC box coordinates (list of SSA i32),
@@ -56,7 +56,7 @@ def tma_store_issue(tma_desc_ssa, smem_window, coords):
 
 
 def prefetch_tensormap(tma_desc_ssa):
-    """prefetch.tensormap 2D/3D/4D/5D — dimension from the descriptor is
+    """prefetch.tensormap 2D/3D/4D/5D - dimension from the descriptor is
     not in the type text, so emit via inline PTX with the generic form."""
     e = _b._emitter()
     e.raw(f'nvvm.inline_ptx "prefetch.tensormap [$0];" '

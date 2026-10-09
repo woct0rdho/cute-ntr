@@ -1,4 +1,4 @@
-"""cutlass.cute.nvgpu.warp.mma — SM120 block-scaled MMA op catalog."""
+"""cutlass.cute.nvgpu.warp.mma - SM120 block-scaled MMA op catalog."""
 
 # operand-dtype pairs accepted by mma.sync.kind::mxf8f6f4 on sm_120a
 # (a_dtype, b_dtype) tuples; the dispatch module consults this table.

@@ -1,4 +1,4 @@
-"""M6.2: in-kernel layout algebra — dense_gemm's local_tile pattern.
+"""M6.2: in-kernel layout algebra - dense_gemm's local_tile pattern.
 
 Kernel-side hierarchical views with SSA rest coordinates:
   gA_mkl = cute.local_tile(mA, slice_(tile, (None, 0, None)), (None,)*3)

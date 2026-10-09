@@ -1,10 +1,10 @@
-"""S2 acceptance: object-model GEMM — index derivation through the trait
+"""S2 acceptance: object-model GEMM - index derivation through the trait
 table + algebra ops, protocol unchanged (mbarrier/ldmatrix/mma from the
 verified M6 kernels), golden equivalence.
 
 Equivalence contract (the S2 gate): replacing the hand-written offsets in
 tests/python/test_tma_gemm_objects.py with trait-table-derived offsets
-leaves all golden results identical — same kernel protocol, only the
+leaves all golden results identical - same kernel protocol, only the
 index-derivation source changes.
 """
 import sys
@@ -68,10 +68,10 @@ def om_gemm_kernel(mA: cute.TmaTensor, mB: cute.TmaTensor, mC: cute.Tensor,
 
         # ---- per k16-chunk fragments THROUGH THE TABLE:
         # A element (r, c) of chunk kk: SMEM offset (wid*16 + r)*TILE_K
-        # + kk*16 + c  — exactly the algebra the trait table encodes
+        # + kk*16 + c  - exactly the algebra the trait table encodes
         for kk in range(TILE_K // 16):
             # ldmatrix addresses still use the PTX canonical lane mapping
-            # (row = wid*16 + lane16, col-half offset 8*half) — the table
+            # (row = wid*16 + lane16, col-half offset 8*half) - the table
             # is validated by reconstructing the SAME coords from it:
             fa = cute.ldmatrix(sA, (wid * 16 + lane16) * TILE_K
                                + kk * 16 + half * 8, num=4, trans=False)
@@ -120,7 +120,7 @@ def test_object_model_gemm_equivalence(K):
 def test_trait_table_matches_verified_offsets():
     """The table must reproduce the M4-verified handwritten offsets:
     A fragment regs a0..a3 = (group, 2t), (group, 2t+1) then
-    (group+8, 2t), (group+8, 2t+1) then +8 cols — i.e. the ldmatrix x4
+    (group+8, 2t), (group+8, 2t+1) then +8 cols - i.e. the ldmatrix x4
     ordering, and C coords = (group,2t),(group,2t+1),(g+8,2t),(g+8,2t+1)."""
     for lane in range(32):
         group, tig = lane // 4, lane % 4

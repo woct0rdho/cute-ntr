@@ -1,4 +1,4 @@
-"""S3 acceptance: object-model pipeline + generalized TMA — golden
+"""S3 acceptance: object-model pipeline + generalized TMA - golden
 regression of the 2-stage pipelined GEMM using the PipelineTmaAsync
 driver and dynamic-coordinate TMA issue.
 """

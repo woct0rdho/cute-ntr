@@ -1,11 +1,11 @@
-"""cutlass.cute.nvgpu.warp — warp-level op markers (compat)."""
+"""cutlass.cute.nvgpu.warp - warp-level op markers (compat)."""
 
 
 class MmaF16BF16Op:
     """mma.sync.aligned.m16n8k16 f16/bf16 atom.
 
     Official construction: MmaF16BF16Op(a_dtype, acc_dtype, mma_inst_mnk)
-    — sm120a supports m16n8k16 (and k8 narrow variants); inst shapes are
+    - sm120a supports m16n8k16 (and k8 narrow variants); inst shapes are
     validated against the mma_atoms trait table at partition time.
     """
 
@@ -42,7 +42,7 @@ class StMatrix8x8x16bOp:
 
 class MmaMXF4NVF4Op:
     """mma.sync m16n8k64 row.col kind::mxf4nvf4 (fp4 x fp4, e4m3 SF,
-    sf_vec 16) — nvfp4 class."""
+    sf_vec 16) - nvfp4 class."""
 
     shape_mnk = (16, 8, 64)
 

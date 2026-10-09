@@ -1,4 +1,4 @@
-"""algebra.py — CuTe layout algebra: text-emission layer over the cute dialect.
+"""algebra.py - CuTe layout algebra: text-emission layer over the cute dialect.
 
 Copyright (c) 2026 CuTeDSL-Fully-OpenSourced contributors
 Algebra semantics are owned by the C++ passes in cutlass-compiler
@@ -10,7 +10,7 @@ Algebra semantics are owned by the C++ passes in cutlass-compiler
     and RETURNS a typed meta handle carrying the op's result type, so
     composition chains serialize without re-implementing semantics.
 
-Emitter interface: an object with .ssa(...) / .raw(...) — the existing
+Emitter interface: an object with .ssa(...) / .raw(...) - the existing
 KernelEmitter satisfies it. Dynamic leaves are `DynLeaf(ssa)`.
 """
 from __future__ import annotations
@@ -118,11 +118,11 @@ def get_stride(e, lay: CuteOpValue):
 
 
 def size(e, x, mode=None):
-    """cute.size(layout/shape[, mode]) — int_tuple result; static inputs
+    """cute.size(layout/shape[, mode]) - int_tuple result; static inputs
     get the exact literal type (inference-verified), dynamic get "?"."""
     if isinstance(x, CuteOpValue):
         if is_static(getattr(x.ctype, "shape", getattr(x.ctype, "value", ()))):
-            # exact static literal — compute for the type
+            # exact static literal - compute for the type
             try:
                 from .types import Layout as _L
                 meta = getattr(x.ctype, "shape", None)
@@ -167,7 +167,7 @@ def _oracle_type(op_name, *type_texts):
     """Result type from the in-process cutegen oracle (the same library the
     cute dialect and the closed official DSL use as their type engine;
     results cached inside the binding). Returns None when the binding is
-    unavailable — callers then fall back to the verifier-subprocess
+    unavailable - callers then fall back to the verifier-subprocess
     bootstrap path."""
     if _os_algebra.environ.get("SC_ORACLE_OFF"):
         return None
@@ -341,7 +341,7 @@ _PARSEABLE_PLACEHOLDER = '!cute.layout<"(1):(1)">'
 
 def emit_with_inference(e, op_line_builder, placeholder=None):
     """Emit an op whose RESULT TYPE is computed by the C++ verifier (the
-    inference is the C++ algebra — python never derives shapes).
+    inference is the C++ algebra - python never derives shapes).
 
     op_line_builder(result_type_text) -> the op line (sans SSA 'name =').
     placeholder: parseable wrong-type text of the right KIND (layout vs
@@ -355,7 +355,7 @@ def emit_with_inference(e, op_line_builder, placeholder=None):
               f"{body}\n    return\n  }}\n}}\n")
     real = infer_result_type(module)
     if real is None:
-        # placeholder accepted — result genuinely is (1):(1)
+        # placeholder accepted - result genuinely is (1):(1)
         real = ph
     else:
         e._lines[-1] = e._lines[-1].replace(ph, real, 1)

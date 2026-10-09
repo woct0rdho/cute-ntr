@@ -1,8 +1,8 @@
-"""M6.3: 2-stage pipelined TMA GEMM — the dense_gemm mainloop shape.
+"""M6.3: 2-stage pipelined TMA GEMM - the dense_gemm mainloop shape.
 
 Producer/consumer within one CTA: TMA loads k-tile t+2 into stage
 (t mod 2) while compute consumes stage (t mod 2) waiting on parity
-floor(t/2) mod 2 — exactly the PipelineTmaAsync protocol used by the
+floor(t/2) mod 2 - exactly the PipelineTmaAsync protocol used by the
 flagship kernel, expressed with our verified primitives.
 """
 import sys

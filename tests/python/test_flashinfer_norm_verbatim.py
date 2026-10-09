@@ -1,5 +1,5 @@
 """FlashInfer cute_dsl norm operators, UNMODIFIED vendored sources, running
-on the self stack (verbatim acceptance — same standard as dense_gemm.py).
+on the self stack (verbatim acceptance - same standard as dense_gemm.py).
 
 Golden: the operators' own reference math (torch), compared in fp4-decoded
 space against the official NVFP4 quantization semantics.
@@ -75,7 +75,7 @@ def ref_rmsnorm_fp4(x, w, eps, global_scale):
     rms = (xf * rstd * w.float()).to(x.dtype).float()
     # The source deliberately uses half2 multiplication for x*w, followed by
     # f32 scaling with rstd. Mirror that rounding for exact FP4/SF codes while
-    # retaining ``rms`` above as the independent true-math comparison.
+    # retaining `rms` above as the independent true-math comparison.
     quant_input = (x * w).float() * rstd
     yq, sf_q = _quantize_nvfp4_reference(quant_input, global_scale)
     return rms, yq, sf_q

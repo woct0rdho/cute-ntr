@@ -1,4 +1,4 @@
-"""object_model/pipeline.py + tma.py — S3: PipelineTmaAsync driver and
+"""object_model/pipeline.py + tma.py - S3: PipelineTmaAsync driver and
 generalized TMA (clean-room from PTX ISA + BSD example call shapes).
 
 Copyright (c) 2026 CuTeDSL-Fully-OpenSourced contributors
@@ -120,7 +120,7 @@ class PipelineTmaAsync:
 
     # ---- state advance --------------------------------------------------
     def advance(self, state: PipelineState) -> PipelineState:
-        """stage+1 wrap / phase flip — SSA select arithmetic."""
+        """stage+1 wrap / phase flip - SSA select arithmetic."""
         e = _b._emitter()
         one = _b.const_i32(1)
         ns = _b.const_i32(self.num_stages)

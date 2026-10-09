@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""inspect_ptx.py — audit PTX produced by the self stack.
+"""inspect_ptx.py - audit PTX produced by the self stack.
 
 The self stack loads textual PTX straight into the CUDA driver JIT
-(``DG_DUMP_PTX=1`` drops every compiled module to the platform temporary
-directory as ``dg_mod_<n>.ptx``).
-This tool walks those dumps (or any ``--glob``) and verifies, per module:
+(`DG_DUMP_PTX=1` drops every compiled module to the platform temporary
+directory as `dg_mod_<n>.ptx`).
+This tool walks those dumps (or any `--glob`) and verifies, per module:
 
-  * the PTX target is exactly ``sm_120a`` (the only supported profile);
-  * the module exposes at least one ``.entry`` kernel;
-  * no ptxas/nvcc artifacts appear (the self path never runs them — PTX
+  * the PTX target is exactly `sm_120a` (the only supported profile);
+  * the module exposes at least one `.entry` kernel;
+  * no ptxas/nvcc artifacts appear (the self path never runs them - PTX
     comes from the in-tree LLVM NVPTX backend via cutlass-compiler);
   * tensor-core kernels really contain MMA instructions (anti-masquerade
-    check: no scalar-FMA GEMMs posing as ``mma.sync``).
+    check: no scalar-FMA GEMMs posing as `mma.sync`).
 
 Exit code is non-zero if any check fails, so it can gate CI/regression.
 
@@ -64,7 +64,7 @@ def main() -> int:
 
     paths = sorted(glob.glob(args.glob))
     if not paths:
-        print(f"no PTX found for {args.glob!r} — run your workload with "
+        print(f"no PTX found for {args.glob!r} - run your workload with "
               f"DG_DUMP_PTX=1 first")
         return 2
 

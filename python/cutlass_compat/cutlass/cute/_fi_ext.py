@@ -62,6 +62,12 @@ def ceil_div(a, b):
 
         return DynGridExpr(lambda v, f=a, bb=int(b), _i=_i: -(-_i(f(v)) // bb),
                            f"ceil_div({a!r},{b})")
+    if isinstance(a, (tuple, list)):
+        # cute.ceil_div(tensor.shape, tiler_shape) - broadcast the tiler
+        bs = b if isinstance(b, (tuple, list)) else (b,) * len(a)
+        if len(bs) < len(a):
+            bs = tuple(bs) + (1,) * (len(a) - len(bs))
+        return type(a)(ceil_div(x, y) for x, y in zip(a, bs))
     return -(-a // b)  # Python ints at trace time
 
 

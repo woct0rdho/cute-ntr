@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""bench_flashinfer_b12x.py — B12x fused MoE (W4A16 NVFP4) performance.
+"""bench_flashinfer_b12x.py - B12x fused MoE (W4A16 NVFP4) performance.
 
 Runs the UNMODIFIED vendored flashinfer b12x MoE entry
 (flashinfer/fused_moe/cute_dsl/b12x_moe.py @ pinned commit) in whichever
-stack this interpreter is set up as. Performance only — the golden
+stack this interpreter is set up as. Performance only - the golden
 verification lives in tests/python/test_flashinfer_b12x_verbatim.py.
 
 Shapes are model-anchored MoE configurations:

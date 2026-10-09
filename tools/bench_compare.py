@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bench_compare.py — dual-stack performance comparison (official vs self).
+"""bench_compare.py - dual-stack performance comparison (official vs self).
 
 Runs the SAME unmodified upstream benchmark script in BOTH environments:
   - .venv-reference : official nvidia-cutlass-dsl compiler
@@ -115,7 +115,7 @@ def main() -> int:
     # comparison ratios
     out_md = ["# Dual-stack performance comparison (RTX 5090 Laptop)",
               "",
-              f"Generated: {results['generated_at']} — median of {args.repeats} runs.",
+              f"Generated: {results['generated_at']} - median of {args.repeats} runs.",
               "",
               "| Benchmark | Official (ms) | Self (ms) | Official GB/s | Self GB/s | Self/Official |",
               "|---|---|---|---|---|---|"]

@@ -1,4 +1,4 @@
-"""jit.py — @cute.kernel / @cute.jit decorators + compile/launch driver.
+"""jit.py - @cute.kernel / @cute.jit decorators + compile/launch driver.
 
 Flow:
   JitFunction.__call__(*args)
@@ -16,13 +16,26 @@ meta) skips tracing/compiling on repeated calls with identical shapes.
 """
 
 import inspect
+import os as _os
 import shlex
 import textwrap
 from dataclasses import dataclass, field
 
+from ..compiler import compile_mlir_to_ptx, entry_names
+from ..compiler.artifacts import (
+    ArtifactOptions, emit_artifacts, split_options)
+from ..runtime import DriverJit, LaunchManifest
+from . import builtins as _builtins
+from .interp import InterpError, KernelInterpreter, KernelParam
+
 _DEBUG_BIND = False
 _compile_only = False
 _target_override = None
+# Artifact dumping is opt-in via the official compile-option surface. When
+# active, the next compile of each specialization also runs ptxas/nvdisasm
+# and records a report here (keyed by (target, specialization)).
+_artifact_options = None
+_artifact_reports: dict = {}
 
 
 def _normalize_target(value: str) -> str:
@@ -40,7 +53,7 @@ def _target_from_options(options) -> str | None:
         return None
     if not isinstance(options, str):
         raise TypeError("cute.compile options must be a string")
-    tokens = shlex.split(options)
+    tokens = split_options(options)
     for i, token in enumerate(tokens):
         if token == "--gpu-arch":
             if i + 1 >= len(tokens):
@@ -49,6 +62,34 @@ def _target_from_options(options) -> str | None:
         if token.startswith("--gpu-arch="):
             return _normalize_target(token.split("=", 1)[1])
     return None
+
+
+class _artifacts_active:
+    """Scope the artifact options around one compile."""
+
+    def __init__(self, artifacts: ArtifactOptions | None):
+        self._artifacts = artifacts
+        self._previous = None
+
+    def __enter__(self):
+        global _artifact_options
+        self._previous = _artifact_options
+        _artifact_options = self._artifacts
+        return self
+
+    def __exit__(self, *exc):
+        global _artifact_options
+        _artifact_options = self._previous
+        return False
+
+
+def _artifacts_from_options(options) -> ArtifactOptions:
+    """Artifact-dump flags from the official compile-option surface."""
+    if not options:
+        return ArtifactOptions()
+    if not isinstance(options, str):
+        raise TypeError("cute.compile options must be a string")
+    return ArtifactOptions.from_string(options)
 
 
 def _with_target(fn, args, target):
@@ -60,11 +101,6 @@ def _with_target(fn, args, target):
         return fn(*args)
     finally:
         _target_override = previous
-
-from ..compiler import compile_mlir_to_ptx, entry_names
-from ..runtime import DriverJit, LaunchManifest
-from . import builtins as _builtins
-from .interp import InterpError, KernelInterpreter, KernelParam
 
 
 class DynGridExpr:
@@ -202,7 +238,22 @@ class _KernelCallStub:
                     continue  # compile-time coordinate/tma meta: not an ABI arg
                 names = _host_trace.get("tensor_names", {})
                 base = getattr(v, "base", v)  # TiledTensorMeta -> its base meta
-                jit_name = names.get(id(v)) or names.get(id(base)) or p.name
+                jit_name = names.get(id(v)) or names.get(id(base))
+                if jit_name is None:
+                    # make_tensor(t.iterator, layout) intentionally creates a
+                    # new TensorMeta. Resolve that view through its storage
+                    # address so derived CuTe layouts still bind to the
+                    # original tensor ABI entry.
+                    try:
+                        addr = int(v._torch.data_ptr())
+                    except Exception:
+                        addr = None
+                    for source_name, source_addr in _host_trace.get(
+                            "call_addrs", {}).items():
+                        if addr is not None and int(source_addr) == addr:
+                            jit_name = source_name
+                            break
+                jit_name = jit_name or p.name
                 abi.append(("tensor", jit_name))
             elif p.kind == "pointer":
                 v = arg_values[p.name]
@@ -231,7 +282,7 @@ class _KernelCallStub:
         else:
             launch_grid = requested_grid[:3]
         # resolve each tma view's SOURCE tensor/pointer name via the
-        # per-call address table (addresses are unique within one call) —
+        # per-call address table (addresses are unique within one call) -
         # cached plans use this to re-encode descriptors when the source
         # tensor address changes between calls
         call_addrs = _host_trace.get("call_addrs", {})
@@ -277,7 +328,7 @@ class JitFunction:
         # One bound clone per (instance, METHOD): sibling @cute.jit methods
         # on the same instance must not evict each other's specialization
         # cache. The b12x static kernel launches __call__ and
-        # _resident_grid_barrier every invocation — with a single shared
+        # _resident_grid_barrier every invocation - with a single shared
         # slot each access missed and rebuilt a fresh JitFunction, forcing a
         # full re-trace + re-compile per call (~600 ms steady-state).
         slot = f"_jit_bound_{self.__name__}"
@@ -304,7 +355,7 @@ class JitFunction:
         params = self._params
         if _host_trace.get("active") is not None:
             # nested @cute.jit call during an active trace: values are
-            # trace-time objects (views, fragments, plain ints) — bind
+            # trace-time objects (views, fragments, plain ints) - bind
             # verbatim; the body executes inline into the outer trace.
             kw = kwargs or {}
             for i, p in enumerate(params):
@@ -363,7 +414,7 @@ class JitFunction:
                     pass
                 if getattr(v, "_mark_dynamic", False):
                     # P5 policy: marked extents leave the specialization
-                    # key and ride the runtime-scalar channel instead —
+                    # key and ride the runtime-scalar channel instead -
                     # one compiled plan is shared across their values.
                     key_parts.append((
                         p.name, "tensor-dynamic", len(v.shape),
@@ -395,9 +446,16 @@ class JitFunction:
     def _call(self, *args, **kwargs):
         if _host_trace.get("active") is not None:
             raise InterpError("nested @cute.jit call unsupported")
+        # These maps describe one outer invocation. Keeping entries from a
+        # previous call lets recycled Python ids or CUDA addresses assign a
+        # derived tensor view to a stale ABI name.
+        _host_trace["tensor_names"] = {}
+        _host_trace["call_addrs"] = {}
+        _host_trace_runtime.clear()
+        _host_trace_tma.clear()
         if self._has_self and self._bound_self is None \
                 and len(args) == len(self._params) + 1:
-            # obj(...) via type(obj).__call__(obj, ...) — bind the instance
+            # obj(...) via type(obj).__call__(obj, ...) - bind the instance
             self._bound_self = args[0]
             args = args[1:]
         if kwargs:
@@ -414,7 +472,12 @@ class JitFunction:
         bound, key, tensors = self._bind(args, kwargs)
         target = _target_override or self.target
         key = (target,) + tuple(key)
-        cached = self._cache.get(key)
+        artifacts = _artifact_options
+        want_artifacts = artifacts is not None and artifacts.any()
+        # An artifact request must recompile: the cached plan has already
+        # been traced and cannot reproduce intermediate files.
+        cached = None if (want_artifacts and key not in _artifact_reports) \
+            else self._cache.get(key)
 
         if cached is None:
             records = self._trace(bound, args)
@@ -422,8 +485,19 @@ class JitFunction:
             for rec in records:
                 ptx = compile_mlir_to_ptx(
                     rec.emitter.module_text(), target=target)
+                _directives = _os.environ.get("DG_ENTRY_DIRECTIVES") \
+                    or (f".maxnreg {_os.environ['DG_MAXNREG']}"
+                        if _os.environ.get("DG_MAXNREG") else "")
+                if _directives:
+                    from ..compiler.ptx_pipeline import _apply_entry_directives
+
+                    ptx = _apply_entry_directives(
+                        ptx, [d.strip() for d in _directives.split(",") if d.strip()])
                 entries = entry_names(ptx)
                 assert entries, "no kernel entry in emitted PTX"
+                if want_artifacts:
+                    _artifact_reports[key] = emit_artifacts(
+                        ptx, target, artifacts, stem=entries[0])
                 jit = DriverJit(ptx, target=target)
                 manifest = LaunchManifest(
                     entry=entries[0],
@@ -432,6 +506,8 @@ class JitFunction:
                           for name in [entry[1]]],
                     grid=rec.grid,
                     block=rec.block,
+                    dynamic_smem_bytes=int(
+                        getattr(rec.emitter, "smem_arena_bytes", 0) or 0),
                     target=target,
                 )
                 manifest.uses_printf = rec.emitter.uses_printf
@@ -496,7 +572,7 @@ class JitFunction:
         if needs_sync:
             # device printf FIFO flushes at the next context sync point
             DriverJit.synchronize_ctx()
-        # NOTE: no ctx-wide sync otherwise — launches are stream-ordered on
+        # NOTE: no ctx-wide sync otherwise - launches are stream-ordered on
         # the default stream; readback paths synchronize explicitly.
 
     def _call_nested(self, *args, **kwargs):
@@ -632,13 +708,15 @@ def compile_function(fn, *args, **options):
     """cute.compile(fn, *args, options=...) -> cached callable.
 
     The official CuTe DSL selects the device architecture with the
-    ``--gpu-arch`` compile option.  Preserve that interface here while also
-    accepting the additive ``@cute.jit(target=...)`` spelling.
+    `--gpu-arch` compile option.  Preserve that interface here while also
+    accepting the additive `@cute.jit(target=...)` spelling.
     """
     target = _target_from_options(options.get("options"))
+    artifacts = _artifacts_from_options(options.get("options"))
     if isinstance(fn, JitFunction):
         fn._bind(args)  # prime specialization (compile on first call)
-        return _CompiledCallable(fn, args, target=target)
+        return _CompiledCallable(fn, args, target=target,
+                                 artifact_options=artifacts)
     if callable(fn):
         # Official compile accepts any callable (kernel objects whose
         # __call__ is typically @cute.jit). Semantics: compile-time args
@@ -655,16 +733,20 @@ def compile_function(fn, *args, **options):
             and not isinstance(getattr(value, "value", value), bool)
         }
         if any(param.kind == "pointer" for param in params) and forced_names:
-            return _DeferredCompiledCallable(fn, args, forced_names, target=target)
+            return _DeferredCompiledCallable(fn, args, forced_names,
+                                             target=target,
+                                             artifact_options=artifacts)
 
         global _compile_only
         previous = _compile_only
         _compile_only = True
         try:
-            _with_target(fn, args, target)
+            with _artifacts_active(artifacts):
+                _with_target(fn, args, target)
         finally:
             _compile_only = previous
-        return _CompiledCallable(fn, args, target=target)
+        return _CompiledCallable(fn, args, target=target,
+                                 artifact_options=artifacts)
     raise TypeError("cute.compile expects a callable")
 
 
@@ -672,10 +754,11 @@ class _CompiledCallable:
     """Post-cute.compile runner: later calls replace the tensor args of
     the priming signature, reusing captured constexpr scalars."""
 
-    def __init__(self, fn, prime_args, target=None):
+    def __init__(self, fn, prime_args, target=None, artifact_options=None):
         self._fn = fn
         self._prime = list(prime_args)
         self._target = target
+        self._artifact_options = artifact_options
 
     @staticmethod
     def _is_stream(value):
@@ -743,21 +826,32 @@ class _CompiledCallable:
         return merged
 
     def __call__(self, *dyn_args):
-        return _with_target(self._fn, tuple(self._merge(dyn_args)), self._target)
+        with _artifacts_active(self._artifact_options):
+            return _with_target(self._fn, tuple(self._merge(dyn_args)),
+                                self._target)
+
+    @property
+    def artifact_reports(self) -> dict:
+        """Reports from the official-style artifact compile options."""
+        return {k: v for k, v in _artifact_reports.items()
+                if k[0] == (self._target or k[0])}
 
 
 class _DeferredCompiledCallable(_CompiledCallable):
     """Pointer-based wrapper specialized after runtime layout sizes arrive."""
 
-    def __init__(self, fn, prime_args, forced_names, target=None):
-        super().__init__(fn, prime_args, target=target)
+    def __init__(self, fn, prime_args, forced_names, target=None,
+                 artifact_options=None):
+        super().__init__(fn, prime_args, target=target,
+                         artifact_options=artifact_options)
         self._forced_names = frozenset(forced_names)
 
     def __call__(self, *dyn_args):
         merged = self._merge(dyn_args)
         bound_call = getattr(self._fn, "__call__")
         bound_call._forced_constexpr_names = self._forced_names
-        return _with_target(bound_call, tuple(merged), self._target)
+        with _artifacts_active(self._artifact_options):
+            return _with_target(bound_call, tuple(merged), self._target)
 
 
 # trace state (single-threaded)

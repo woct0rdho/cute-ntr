@@ -1,4 +1,4 @@
-"""tensor_map.py — CUtensorMap recipe (host side).
+"""tensor_map.py - CUtensorMap recipe (host side).
 
 The compiler never encodes the opaque TensorMap bit pattern; it emits a
 recipe (element type, rank, dims/strides, box, swizzle...) and this

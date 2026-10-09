@@ -1,4 +1,4 @@
-"""cutlass.cute.nvgpu.warpgroup — SM120 blockscaled layout helpers."""
+"""cutlass.cute.nvgpu.warpgroup - SM120 blockscaled layout helpers."""
 
 
 def make_smem_layout_atom(*args, **kw):
@@ -7,6 +7,6 @@ def make_smem_layout_atom(*args, **kw):
     caller via tile_to_shape-style staging."""
     from cutlass.cute import make_layout
 
-    # call forms: (dtype, layout_enum) / (dtype) — return a canonical
+    # call forms: (dtype, layout_enum) / (dtype) - return a canonical
     # K-major atom; the exact swizzle choice rides the composed path.
     return make_layout((64, 64))

@@ -1,4 +1,4 @@
-"""cutlass.torch — torch tensor adapter (from_dlpack) for the compat surface."""
+"""cutlass.torch - torch tensor adapter (from_dlpack) for the compat surface."""
 from __future__ import annotations
 
 import torch as _torch_mod  # module-level so _TORCH_OF table can reference it
@@ -64,10 +64,10 @@ def current_stream():
 
 
 def matrix(l, m_or_n, k_or_m, major, dtype, gen=None):
-    """cutlass_torch.matrix(l, m, k, major, dtype) — synthetic GEMM operand.
+    """cutlass_torch.matrix(l, m, k, major, dtype) - synthetic GEMM operand.
 
-    The logical result is always ``(mode0, mode1, l)``.  ``major`` is the
-    official boolean ``is_mode0_major`` (string spellings are accepted for
+    The logical result is always `(mode0, mode1, l)`.  `major` is the
+    official boolean `is_mode0_major` (string spellings are accepted for
     compatibility) and changes strides, not logical shape.
     """
     import torch as _t
@@ -161,7 +161,7 @@ _FP4_CODESTS = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 def _pack_fp4(f32_tensor):
     """Pack an f32 tensor into E2M1 nibbles (2 per byte, element k even in
-    the LOW nibble) — the CUTLASS fp4 storage convention."""
+    the LOW nibble) - the CUTLASS fp4 storage convention."""
     import torch as _t
 
     values = f32_tensor.to(_t.float32)
@@ -213,8 +213,8 @@ def create_and_permute_torch_tensor(shape, dtype, permute_order=(0,),
                                     init_type=None, init_config=None):
     """Create a tensor with the official RANDOM integer-value semantics.
 
-    CUTLASS initializes an int32 tensor with ``random_(min, max)`` and then
-    converts it to the requested dtype; ``max`` is exclusive.  Using a
+    CUTLASS initializes an int32 tensor with `random_(min, max)` and then
+    converts it to the requested dtype; `max` is exclusive.  Using a
     continuous uniform distribution here made the block-scale reference hold
     unquantized values while the device tensor held E4M3-rounded values.
     """

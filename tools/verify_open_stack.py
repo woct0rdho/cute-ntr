@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""verify_open_stack.py — assert the SELF stack contains no proprietary
+"""verify_open_stack.py - assert the SELF stack contains no proprietary
 compiler components.
 
 Checks (fail = non-zero exit):
@@ -40,7 +40,7 @@ for tool in ("nvcc", "ptxas", "nvrtc-compiler"):
     if shutil.which(tool):
         failures.append(f"banned tool on PATH: {tool}")
 
-# 4. EULA subtree vendored? (the repo's python/ package dir — NOT the BSD
+# 4. EULA subtree vendored? (the repo's python/ package dir - NOT the BSD
 #    examples/python/CuTeDSL demos, which we vendor deliberately)
 eula_root = ROOT / "third_party/cutlass/python"
 if eula_root.exists():

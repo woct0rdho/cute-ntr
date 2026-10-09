@@ -1,4 +1,4 @@
-"""mma_atoms.py — per-atom closed-form trait tables for TiledMma partitioning.
+"""mma_atoms.py - per-atom closed-form trait tables for TiledMma partitioning.
 
 Copyright (c) 2026 CuTeDSL-Fully-OpenSourced contributors
 Trait values calibrated against the verified handwritten kernels in
@@ -8,7 +8,7 @@ The open cute dialect does NOT ship TiledMma ops (official partitioning
 lives in the closed cute_nvgpu). This module is the sanctioned extension
 point: each atom contributes a table of per-thread fragment layouts;
 partition_A/B/C derive their index arithmetic GENERALLY through
-algebra.py ops — never per-kernel hand-written offsets.
+algebra.py ops - never per-kernel hand-written offsets.
 """
 from __future__ import annotations
 

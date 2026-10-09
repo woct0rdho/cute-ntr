@@ -1,4 +1,4 @@
-"""interp.py — typed AST interpreter for @cute.kernel device code (M2 scope).
+"""interp.py - typed AST interpreter for @cute.kernel device code (M2 scope).
 
 Walks the kernel function's Python AST and emits MLIR via KernelEmitter.
 Value model:
@@ -264,7 +264,7 @@ class KernelInterpreter:
         cond = _unwrap_typed_scalar(self.eval(node.test))
         if isinstance(cond, SSA):
             # Dynamic branches use the same storage-root analysis as dynamic
-            # loops.  In particular, ``values[0] = ...`` must be yielded by
+            # loops.  In particular, `values[0] = ...` must be yielded by
             # scf.if when values is a Python list or register fragment.
             snapshot = dict(self.env)
             snaps = [(v, v.__snapshot__()) for v in snapshot.values()
@@ -552,7 +552,7 @@ class KernelInterpreter:
 
     @staticmethod
     def _while_as_for(node: ast.While):
-        """Recognize ``while i < end: ...; i += step`` as an scf.for."""
+        """Recognize `while i < end: ...; i += step` as an scf.for."""
         if not isinstance(node.test, ast.Compare) or len(node.test.ops) != 1 \
                 or not isinstance(node.test.ops[0], ast.Lt) \
                 or not isinstance(node.test.left, ast.Name) or not node.body:
@@ -711,7 +711,7 @@ class KernelInterpreter:
         template = next((item for item in dynamic if item is not None), None)
         if template is None:
             # A literal initial value can still be loop-carried when the body
-            # derives a dynamic value from it (for example ``total += i``).
+            # derives a dynamic value from it (for example `total += i`).
             if any(isinstance(item, float) for item in leaves):
                 template = self.emitter.ssa(
                     "f32", "arith.constant 0.0 : f32")
@@ -802,6 +802,14 @@ class KernelInterpreter:
             if root is not None:
                 assigned.add(root)
 
+        def add_fragment_arg(arg):
+            if isinstance(arg, (ast.Tuple, ast.List)):
+                for item in arg.elts:
+                    add_fragment_arg(item)
+            elif isinstance(arg, ast.Name) and isinstance(
+                    self.env.get(arg.id), Fragment):
+                assigned.add(arg.id)
+
         def walk(n):
             if isinstance(n, ast.Assign):
                 for target in n.targets:
@@ -819,11 +827,12 @@ class KernelInterpreter:
                 # canonical API rather than returning a newly allocated
                 # object.  Treat the accumulator argument as a loop-carried
                 # value so dynamic K loops yield its SSA registers correctly.
-                if n.func.attr == "gemm":
+                if n.func.attr in ("gemm", "online_softmax"):
                     for arg in n.args[1:2]:
-                        if isinstance(arg, ast.Name) and isinstance(
-                                self.env.get(arg.id), Fragment):
-                            assigned.add(arg.id)
+                        add_fragment_arg(arg)
+                if n.func.attr == "online_softmax":
+                    for arg in n.args[2:4]:
+                        add_fragment_arg(arg)
             for child in ast.iter_child_nodes(n):
                 walk(child)
 
@@ -1019,6 +1028,14 @@ class KernelInterpreter:
                 if isinstance(meta, TiledCoordinateMeta):
                     return BlockTile(None, meta, idx, is_coord=True)
                 return BlockTile(base.ptr, meta, idx)
+            if not is_tiled and isinstance(slice_node, ast.Tuple):
+                # Rank-reducing slice of a plain global tensor, e.g.
+                # `mC[None, None, bidz]` in the official GEMM example:
+                # keep the None modes, fold the indexed ones into a pointer
+                # offset.
+                sliced = self._slice_global_tensor(base, slice_node)
+                if sliced is not None:
+                    return sliced
             # flat element access (1-D untiled tensors, M2 path)
             i = self.eval(slice_node)
             import os as _os
@@ -1099,6 +1116,69 @@ class KernelInterpreter:
                            if slice_node.step else None)
             return base[sl]
         raise InterpError(f"subscript on {type(base)} unsupported")
+
+    def _slice_global_tensor(self, base, slice_node):
+        """`t[None, None, i]` on an untiled global tensor.
+
+        Returns a new :class:`KernelTensor` over the retained modes whose base
+        pointer is advanced by the folded strides of the indexed modes, or
+        `None` when the subscript is not a rank-reducing slice (so the
+        caller can fall through to element access).
+        """
+        from .kernel_objects import KernelTensor
+        from .meta import TensorMeta
+
+        meta = base.meta
+        shape = tuple(getattr(meta, "shape", ()))
+        stride = tuple(getattr(meta, "stride", ()) or ())
+        if not shape or len(slice_node.elts) > len(shape):
+            return None
+        keep_shape, keep_stride = [], []
+        offset = 0
+        for mode, elt in enumerate(slice_node.elts):
+            if isinstance(elt, ast.Constant) and elt.value is None:
+                keep_shape.append(shape[mode])
+                keep_stride.append(stride[mode])
+                continue
+            value = self.eval(elt)
+            if isinstance(value, int):
+                offset += value * stride[mode]
+                continue
+            if not isinstance(value, SSA):
+                return None
+            if isinstance(offset, int):
+                offset = self.emitter.ssa(
+                    "i64", f"arith.constant {offset} : i64")
+            if value.type == "i32":
+                value = self.emitter.ssa(
+                    "i64", f"arith.extsi {value.name} : i32 to i64")
+            scaled = self.emitter.ssa(
+                "i64", f"arith.muli {value.name}, "
+                f"{self.emitter.ssa('i64', f'arith.constant {int(stride[mode])} : i64').name} : i64")
+            offset = self.emitter.ssa(
+                "i64", f"arith.addi {offset.name}, {scaled.name} : i64")
+        if len(keep_shape) == len(shape) and isinstance(offset, int) \
+                and offset == 0:
+            return None
+        # trailing modes left out of the subscript keep their identity
+        for mode in range(len(slice_node.elts), len(shape)):
+            keep_shape.append(shape[mode])
+            keep_stride.append(stride[mode])
+        elem_name = getattr(meta.element_type, "name", "f32")
+        ety = {"Float16": "f16", "float16": "f16", "Float32": "f32",
+               "float32": "f32", "BFloat16": "bf16",
+               "bfloat16": "bf16"}.get(elem_name, "f32")
+        if isinstance(offset, int):
+            ptr = base.ptr if offset == 0 else self.emitter.gep(
+                base.ptr, offset, ety)
+        else:
+            ptr = self.emitter.gep(base.ptr, offset, ety)
+        sliced = KernelTensor(
+            ptr,
+            TensorMeta(getattr(meta, "_torch", None), meta.element_type,
+                       tuple(keep_shape), tuple(keep_stride)),
+            meta.element_type)
+        return sliced
 
     def _single_dynamic_index(self, slice_node):
         """From ((None,None), bidx) extract the single non-None SSA index.

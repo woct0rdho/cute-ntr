@@ -1,4 +1,4 @@
-"""cute_objects.py — the CuTe object-model layer (M6.1): Layout/Tensor meta,
+"""cute_objects.py - the CuTe object-model layer (M6.1): Layout/Tensor meta,
 TMA atom + partition, TiledMma with partition_A/B/C, and fragment gemm.
 
 All meta computed at trace time (official CuTeDSL model); values that
@@ -76,7 +76,7 @@ class Layout:
         if isinstance(i, tuple) and len(i) == 2 and isinstance(i[1], (tuple, list)) \
                 and isinstance(self.shape, tuple) and len(self.shape) == 2 \
                 and isinstance(self.shape[1], (tuple, list)):
-            # ((tile),(rest))[k, (None,...)] — dense_gemm grid-shape idiom:
+            # ((tile),(rest))[k, (None,...)] - dense_gemm grid-shape idiom:
             # select tile group k, keep the flagged rest modes
             rest_s = _flatten(self.shape[1])
             rest_d = _flatten(self.stride[1])
@@ -84,7 +84,7 @@ class Layout:
             keep_d = [d for d, c in zip(rest_d, i[1]) if c is None]
             return Layout(tuple(keep_s), tuple(keep_d))
         if isinstance(i, tuple):
-            # coord-style get: (int|(None,...), ...) — project modes
+            # coord-style get: (int|(None,...), ...) - project modes
             keep = []
             flat_s = _flatten(self.shape)
             flat_d = _flatten(self.stride)
@@ -200,7 +200,7 @@ class Tensor:
         if all(fully_specified(c) for c in idx) \
                 and self.base.__class__.__name__ == "SmemArray":
             return self._load_smem_element(idx)
-        # ((tile),(rest))[(k, (None,...))] — hierarchical grid idiom:
+        # ((tile),(rest))[(k, (None,...))] - hierarchical grid idiom:
         # select tile group k, keep the flagged rest modes
         if len(idx) == 2 and isinstance(idx[0], int) \
                 and isinstance(idx[1], (tuple, list)) \
@@ -219,7 +219,7 @@ class Tensor:
         flat_s = list(_flatten(self.layout.shape))
         flat_d = list(_flatten(self.layout.stride))
         if len(idx) > len(flat_s):
-            # trailing stage selectors (sX[None, None, 0]) drop out —
+            # trailing stage selectors (sX[None, None, 0]) drop out -
             # staging rides the dedicated window machinery
             idx = idx[:len(flat_s)]
         offs = dict(getattr(self, "coord_offs", {}))
@@ -729,7 +729,7 @@ class MmaF16BF16OpAtom:
 
 
 class TiledMma:
-    """make_tiled_mma(MmaF16BF16Op, atom_layout) — m16n8k16 warp atom tiled
+    """make_tiled_mma(MmaF16BF16Op, atom_layout) - m16n8k16 warp atom tiled
     over the CTA by atom_layout (M-tiles, N-tiles, _)."""
 
     def __init__(self, op, atom_layout=None, num_warps=None):
@@ -754,11 +754,29 @@ class TiledMma:
         return FragmentViewB(view)
 
     def make_fragment_C(self, view):
-        """Allocate the per-thread accumulator in MMA C-value order."""
+        """Allocate the per-thread accumulator in MMA C-value order.
+
+        `mma_shape` records the `(4, MMA_M, MMA_N)` value geometry of the
+        fragment so register-layout conversions (`reshape_acc_to_frgA`) do
+        not have to re-derive it from the owning MMA.
+        """
         from .kernel_objects import Fragment
         from .meta import F32
 
-        return Fragment(view.count, F32, name="tCrC")
+        frag = Fragment(view.count, F32, name="tCrC")
+        mma = getattr(view, "mma", None)
+        if mma is not None:
+            frag.mma_shape = _acc_mma_shape(mma)
+        return frag
+
+
+def _acc_mma_shape(mma):
+    """(4, MMA_M, MMA_N) of one warp's accumulator for this tiled MMA."""
+    am, an, ak = getattr(getattr(mma, "op", None), "shape_mnk", (16, 8, 16))
+    warp_m, warp_n = getattr(mma, "tile_mn", (32, 32))
+    if ak >= 64:
+        warp_m, warp_n, _ = _blockscaled_warp_tile(mma)
+    return (4, warp_m // am, warp_n // an)
 
 
 class MmaThreadSlice:
@@ -785,6 +803,15 @@ class MmaThreadSlice:
 
     def partition_C(self, gC):
         return PartitionedAccumulator(gC, self.mma, self.tidx)
+
+    def partition_shape_C(self, shape):
+        """`thr_mma.partition_shape_C((M, N))`: per-thread C shape.
+
+        The official API used to size an accumulator before a destination
+        tensor exists (and the way to get an accumulator when nothing is
+        stored through it, e.g. the score fragment).
+        """
+        return AccumulatorShape(self.mma, tuple(int(d) for d in _flatten(shape)))
 
 
 class PartitionedMmaOperand:
@@ -833,7 +860,7 @@ def _frag_atom_grid(part):
 
 class FragmentViewA:
     """make_fragment_A: per-thread operand registers, keyed by k_block.
-    slots[k] = [SSA i32] * (4 * MMA_M) — ldmatrix regs, bitcast at mma."""
+    slots[k] = [SSA i32] * (4 * MMA_M) - ldmatrix regs, bitcast at mma."""
 
     def __init__(self, view):
         self.view = view
@@ -851,7 +878,7 @@ class FragmentViewA:
         return self.view.part.mma
 
     def __getitem__(self, idx):
-        # (None, None, k) — k_block selection for gemm/copy targets
+        # (None, None, k) - k_block selection for gemm/copy targets
         if isinstance(idx, tuple) and len(idx) == 3:
             atom = 0 if idx[1] is None else int(_const_of(idx[1]))
             k = idx[2]
@@ -879,7 +906,7 @@ class FragmentViewB(FragmentViewA):
 
 
 class FragK:
-    """tCrX[None, None, k] — a fragment sliced at one k block."""
+    """tCrX[None, None, k] - a fragment sliced at one k block."""
 
     def __init__(self, frag, k, atom=0, atom_count=1):
         self.frag = frag
@@ -903,7 +930,7 @@ class TiledCopyCAtom:
     The original API primarily uses this descriptor for an SMEM epilogue.  A
     universal atom is also supported by the compatibility backend for the
     direct SM86 epilogue, allowing the application to remain expressed as
-    ``cute.copy(tiled_copy_C, tCrC, tCgC)``.
+    `cute.copy(tiled_copy_C, tCrC, tCgC)`.
     """
 
     def __init__(self, atom, mma):
@@ -1054,7 +1081,7 @@ class TiledCopyAB:
     def get_slice(self, tidx):
         tc = TiledCopyAB(self.which, self.atom, self.mma)
         tc.tidx = tidx
-        # cute.copy is invoked with the ORIGINAL object in dense_gemm —
+        # cute.copy is invoked with the ORIGINAL object in dense_gemm -
         # remember the bound thread index on it too
         self.tidx = tidx
         return tc
@@ -1097,8 +1124,8 @@ class SmemCopySrc:
 class PartitionedAccumulator:
     """Per-thread accumulator grid.
 
-    Ordinary atoms use ``(4, MMA_M, MMA_N)``. SM120 block-scaled fragments
-    group two M atoms as ``(8, MMA_M/2, MMA_N)``.
+    Ordinary atoms use `(4, MMA_M, MMA_N)`. SM120 block-scaled fragments
+    group two M atoms as `(8, MMA_M/2, MMA_N)`.
     """
 
     def __init__(self, tile, mma, tidx):
@@ -1116,6 +1143,25 @@ class PartitionedAccumulator:
             warp_m, warp_n, _ = _blockscaled_warp_tile(self.mma)
             return (8, (warp_m // am) // 2, warp_n // an)
         return (4, warp_m // am, warp_n // an)
+
+    @property
+    def count(self):
+        c = 1
+        for d in self.shape:
+            c *= int(d)
+        return c
+
+
+class AccumulatorShape:
+    """Per-thread accumulator geometry from `partition_shape_C`."""
+
+    def __init__(self, mma, cta_shape):
+        self.mma = mma
+        self.cta_shape = cta_shape
+
+    @property
+    def shape(self):
+        return _acc_mma_shape(self.mma)
 
     @property
     def count(self):

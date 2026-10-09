@@ -5,7 +5,7 @@ PTX -> Driver JIT -> 5090), golden-compared against torch einsum.
 The kernel source is imported unmodified from third_party/cutlass examples.
 Tile (64,64,64) is the configuration the example ships with; larger tiles
 exceed SMEM (tile_m=128, skipped by the official runner too) or need the
-multi-epi-tile epilogue (tile_n=128) — recorded as boundaries in README.
+multi-epi-tile epilogue (tile_n=128) - recorded as boundaries in README.
 """
 import sys
 from pathlib import Path

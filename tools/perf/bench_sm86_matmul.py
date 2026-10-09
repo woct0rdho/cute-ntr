@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark the SM86 CuTe matmul against eager ``torch.mm``.
+"""Benchmark the SM86 CuTe matmul against eager `torch.mm`.
 
 The benchmark requires the local compute-capability 8.6 device. Compilation,
 first launch, allocation, and correctness checks are reported separately from

@@ -1,4 +1,4 @@
-"""cutlass.cute.nvgpu — device op markers (compat)."""
+"""cutlass.cute.nvgpu - device op markers (compat)."""
 from enum import Enum
 
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""bench_flashinfer_norm.py — rmsnorm_fp4quant + add_rmsnorm_fp4quant perf.
+"""bench_flashinfer_norm.py - rmsnorm_fp4quant + add_rmsnorm_fp4quant perf.
 
 Runs the UNMODIFIED vendored flashinfer operators
 (third_party/flashinfer-src @ pinned commit) in whichever stack this
 interpreter is set up as (self via tools/perf/run_all_perf.sh, official via
-.venv-reference). Performance only — no golden verification here (that is
+.venv-reference). Performance only - no golden verification here (that is
 tests/python/test_flashinfer_norm_verbatim.py).
 
-Shapes: (tokens, hidden) pairs representative of mainstream LLM serving —
+Shapes: (tokens, hidden) pairs representative of mainstream LLM serving -
 Qwen3-30B-A3B hidden 2048 (prefill- and decode-scale token counts) and a
 5120-hidden config (DeepSeek-class).  All use the documented NVFP4 recipe
 (block_size 16, fixed global scale) exactly as the correctness tests do.

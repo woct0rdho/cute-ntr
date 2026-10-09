@@ -3,7 +3,7 @@ running VERBATIM on the self-hosted stack with golden comparison.
 
 Source: third_party/.../blockscaled_gemm/dense_blockscaled_gemm_persistent_
 cooperative.py, imported unmodified. The sv=32 (MXFP4/e8m0) config and the
-unaligned boundary shape are honest boundaries — see README.
+unaligned boundary shape are honest boundaries - see README.
 """
 import sys
 from pathlib import Path

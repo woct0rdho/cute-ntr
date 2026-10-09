@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""bench_elementwise.py — official Ampere elementwise_add demo (FP32)
+"""bench_elementwise.py - official Ampere elementwise_add demo (FP32)
 performance, verbatim operator source, dual-stack.
 
-Imports the UNMODIFIED demo module and drives its own ``testing.benchmark``
+Imports the UNMODIFIED demo module and drives its own `testing.benchmark`
 harness (CUDA events, returns µs/iteration).
 
 Usage:

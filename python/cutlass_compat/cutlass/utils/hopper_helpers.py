@@ -1,4 +1,4 @@
-"""cutlass.utils.hopper_helpers — SM90-era smem layout helpers (compat).
+"""cutlass.utils.hopper_helpers - SM90-era smem layout helpers (compat).
 
 Re-exported SM120-capable implementations from cutlass.utils; the
 flagship SM120 kernels import this module for the layout helpers only.

@@ -1,4 +1,4 @@
-"""emitter.py — MLIR text emitter for traced kernels (M2 scope).
+"""emitter.py - MLIR text emitter for traced kernels (M2 scope).
 
 Emits gpu.func bodies in the base-dialect boundary (arith/scf/gpu/LLVM),
 which cutlass-compiler's one-shot-convert-to-llvm lowers to NVVM/PTX.
@@ -78,7 +78,7 @@ class SSA:
         return self._bin(o, "arith.subi", "arith.subf")
 
     def __rsub__(self, o):
-        e = self  # note: non-commutative — build other - self
+        e = self  # note: non-commutative - build other - self
         from cutlass._bridge_helpers import _emitter as _E
         ee = _E()
         if hasattr(o, "ssa"):
@@ -132,6 +132,7 @@ class KernelEmitter:
         self._next_id = 0
         self.params: list[tuple[str, str]] = []  # (mlir_name, type)
         self.smem_globals: list[str] = []         # module-level shared decls
+        self.smem_dynamic_tiles: list = []        # (name, byte offset, bytes)
 
     # -- plumbing ----------------------------------------------------------
     def raw(self, line: str) -> None:
@@ -327,6 +328,11 @@ class KernelEmitter:
         return self.ssa("index", f"gpu.block_dim {axis}", "index")
 
     uses_printf = False
+    # Dynamic shared memory: `__dynamic_shmem__0` arena state.  The launcher
+    # must pass smem_arena_bytes to cuLaunchKernel and opt in above 48 KiB.
+    use_dynamic_smem = False
+    smem_arena_bytes = 0
+    smem_dynamic_tiles: list
 
     def printf(self, fmt_c: str, args: list[SSA]) -> None:
         self.uses_printf = True
@@ -391,7 +397,7 @@ class KernelEmitter:
     def mma_mxf4nvf4(self, a, b, sfa, sfb, c):
         """m16n8k64 kind::mxf4nvf4 (SM120 NVFP4). A: 4xi32, B: 2xi32,
         SFA/SFB: 1xi32 each; C: 4xf32; D via explicit asm outputs
-        ($w form — the rw-tied form gets DCEd by the conversion)."""
+        ($w form - the rw-tied form gets DCEd by the conversion)."""
         for x in a + b + sfa + sfb:
             if x.type != "i32":
                 raise TypeError("mxf4nvf4 packed operands must be i32")
@@ -433,6 +439,22 @@ class KernelEmitter:
 
     def bitcast_f16x2(self, v: SSA) -> SSA:
         return self.ssa("vector<2xf16>", f"llvm.bitcast {v.name} : i32 to vector<2xf16>")
+
+    def pack_f16x2(self, lo: SSA, hi: SSA) -> SSA:
+        """Pack two f16 values into the i32 register layout mma.sync wants."""
+        assert lo.type == "f16" and hi.type == "f16", (lo.type, hi.type)
+        vec = self.ssa("vector<2xf16>", "llvm.mlir.undef : vector<2xf16>")
+        c0 = self.ssa("i32", "arith.constant 0 : i32")
+        c1 = self.ssa("i32", "arith.constant 1 : i32")
+        vec = self.ssa(
+            "vector<2xf16>",
+            f"llvm.insertelement {lo.name}, {vec.name}[{c0.name} : i32] "
+            f": vector<2xf16>")
+        vec = self.ssa(
+            "vector<2xf16>",
+            f"llvm.insertelement {hi.name}, {vec.name}[{c1.name} : i32] "
+            f": vector<2xf16>")
+        return self.ssa("i32", f"llvm.bitcast {vec.name} : vector<2xf16> to i32")
 
     def gep_smem(self, base: SSA, offset: SSA, elem: str = "f16") -> SSA:
         off = self.index_to_i64(offset) if getattr(offset, "type", "") in ("index", "i32") else offset
@@ -545,13 +567,60 @@ class KernelEmitter:
         self.raw("nvvm.cp.async.bulk.wait_group 0")
 
     def smem_tile_declare(self, name: str, elems: int, elem_mlir: str = "f32",
-                          align: int = 128) -> SSA:
+                          align: int = 128, dynamic: bool = False) -> SSA:
+        if dynamic:
+            return self._smem_tile_declare_dynamic(
+                name, elems, elem_mlir, align)
         line = (f"    llvm.mlir.global internal @{name}() "
                 f"{{addr_space = 3 : i32, alignment = {align} : i64}} "
                 f": !llvm.array<{elems} x {elem_mlir}>")
         if not any(name in g for g in self.smem_globals):
             self.smem_globals.append(line)
         return self.ssa("!llvm.ptr<3>", f"llvm.mlir.addressof @{name} : !llvm.ptr<3>")
+
+    # Bytes per element for the shared-memory arena accounting.
+    _SMEM_ELEM_BYTES = {"f32": 4, "i32": 4, "f64": 8, "i64": 8,
+                        "f16": 2, "bf16": 2, "i16": 2, "i8": 1,
+                        "i1": 1}
+
+    def _smem_tile_declare_dynamic(self, name: str, elems: int,
+                                   elem_mlir: str, align: int) -> SSA:
+        """Carve `elems` elements out of the dynamic shared-memory arena.
+
+        `sm_86` allows only 48 KiB of *static* shared memory per CTA; larger
+        kernels (a 64-wide K/V tile at head_dim 128, multi-stage pipelines)
+        must allocate from the dynamic buffer and opt in at launch with
+        cuFuncSetAttribute.  The official CuTeDSL does the same thing: its
+        D128 kernel's PTX carries
+        `.extern .shared .align 1024 .b8 __dynamic_shmem__0[]`.
+
+        The arena is one externally declared address-space-3 array; each tile
+        gets a byte offset, so the block's dynamic size is the running total
+        the launcher must pass (`emitter.smem_arena_bytes`).
+        """
+        if not self.use_dynamic_smem:
+            self.use_dynamic_smem = True
+            self.smem_globals.append(
+                '    llvm.mlir.global external @"__dynamic_shmem__0"() '
+                '{addr_space = 3 : i32, alignment = 1024 : i64} '
+                ': !llvm.array<0 x i8>')
+        elem_bytes = self._SMEM_ELEM_BYTES.get(elem_mlir, 4)
+        nbytes = int(elems) * elem_bytes
+        align = max(1, int(align))
+        base = -(-self.smem_arena_bytes // align) * align   # round up
+        self.smem_arena_bytes = base + nbytes
+        # Track per-tile (offset, bytes) so a diagnostic can report the layout.
+        self.smem_dynamic_tiles.append((name, base, nbytes))
+        arena = self.ssa(
+            "!llvm.ptr<3>",
+            'llvm.mlir.addressof @"__dynamic_shmem__0" : !llvm.ptr<3>')
+        if base == 0:
+            return arena
+        off = self.ssa(f"i64", f"llvm.mlir.constant({base} : i64) : i64")
+        return self.ssa(
+            "!llvm.ptr<3>",
+            f"llvm.getelementptr {arena.name}[{off.name}] "
+            f": (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, i8")
 
     def setmaxregister(self, value: int, increase: bool) -> None:
         act = "increase" if increase else "decrease"

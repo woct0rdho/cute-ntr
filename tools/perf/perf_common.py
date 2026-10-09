@@ -1,14 +1,14 @@
-"""perf_common.py — shared helpers for the dual-stack performance suite.
+"""perf_common.py - shared helpers for the dual-stack performance suite.
 
 Every benchmark in tools/perf/ runs the SAME unmodified operator sources in
 two environments:
 
-  self      — this repo's fully open stack (python/ + python/cutlass_compat)
-  official  — the official nvidia-cutlass-dsl wheel (.venv-reference)
+  self      - this repo's fully open stack (python/ + python/cutlass_compat)
+  official  - the official nvidia-cutlass-dsl wheel (.venv-reference)
 
 Timing methodology (uniform across families):
   * per-iteration CUDA events (median / p10 / p90 reported), or the operator's
-    own ``testing.benchmark`` harness where the demo entry point provides it;
+    own `testing.benchmark` harness where the demo entry point provides it;
   * fixed warmup before measurement;
   * GPU state (utilization, clocks, power, memory) recorded next to every
     result so measurements taken on a shared GPU are honestly labeled.
@@ -26,9 +26,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def ensure_stack() -> str:
-    """Import the right ``cutlass`` and return which stack is active.
+    """Import the right `cutlass` and return which stack is active.
 
-    Prefers whatever ``import cutlass`` resolves to; if nothing is importable,
+    Prefers whatever `import cutlass` resolves to; if nothing is importable,
     sets up the self stack paths from this repository.
     """
     try:

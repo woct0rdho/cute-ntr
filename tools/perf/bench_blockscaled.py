@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""bench_blockscaled.py — official blackwell_geforce blockscaled NVFP4
+"""bench_blockscaled.py - official blackwell_geforce blockscaled NVFP4
 cooperative GEMM performance, verbatim operator source, dual-stack.
 
-Imports the UNMODIFIED demo module and drives its own ``testing.benchmark``
-harness. ``skip_ref_check=True``: performance only; golden verification lives
+Imports the UNMODIFIED demo module and drives its own `testing.benchmark`
+harness. `skip_ref_check=True`: performance only; golden verification lives
 in tests/python/test_blockscaled_verbatim.py.
 
 Usage:

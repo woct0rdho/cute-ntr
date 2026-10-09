@@ -1,5 +1,5 @@
-"""M1 DoD test: hand-written MLIR vector-add → open PTX (sm_120a) → Driver JIT
-→ executed on the RTX 5090, numerically verified.
+"""M1 DoD test: hand-written MLIR vector-add -> open PTX (sm_120a) -> Driver JIT
+-> executed on the RTX 5090, numerically verified.
 
 Runs entirely in the SELF environment: no official CuTeDSL wheel, no nvcc,
 no NVRTC, no ptxas. The PTX was produced by cutlass-compiler + LLVM NVPTX.

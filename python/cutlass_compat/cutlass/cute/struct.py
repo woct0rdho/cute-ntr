@@ -1,7 +1,7 @@
-"""cutlass.cute.struct — @struct decorator + MemRange/Align (compat).
+"""cutlass.cute.struct - @struct decorator + MemRange/Align (compat).
 
 `cute.struct` is BOTH the decorator (@cute.struct class ...) and the
-namespace (cute.struct.MemRange[...]) — realized as a callable proxy.
+namespace (cute.struct.MemRange[...]) - realized as a callable proxy.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class Align(metaclass=_AlignMeta):
 
 
 class _StructNamespace:
-    """Callable: @cute.struct — collect MemRange/Align fields; attribute
+    """Callable: @cute.struct - collect MemRange/Align fields; attribute
     access (cute.struct.MemRange) resolves to this module's names."""
 
     def __call__(self, cls):

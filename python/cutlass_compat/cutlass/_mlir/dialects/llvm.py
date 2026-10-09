@@ -42,7 +42,7 @@ def _ptx_f64_literal(v: float) -> str:
 
 def _const_substitutable(v):
     """Literal constants get baked into the asm text as PTX immediates in
-    a temp register — feeding arith.constant into inline_ptx makes the
+    a temp register - feeding arith.constant into inline_ptx makes the
     lowering emit an "n" (immediate) constraint that breaks float asm."""
     if isinstance(v, bool):
         return None

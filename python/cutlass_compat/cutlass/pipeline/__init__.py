@@ -1,4 +1,4 @@
-"""cutlass.pipeline — async pipeline driver objects (compat, clean-room).
+"""cutlass.pipeline - async pipeline driver objects (compat, clean-room).
 
 PipelineTmaAsync / PipelineTmaStore wrap the mbarrier stage/phase
 protocol already verified in M5/M6 (init, expect_tx, try_wait.parity,
@@ -95,7 +95,7 @@ class PipelineState:
             self.num_stages = num_stages
 
     def advance(self, num_stages: int = None):
-        """stage+1 wrap / phase flip — SSA select arithmetic (in place)."""
+        """stage+1 wrap / phase flip - SSA select arithmetic (in place)."""
         e = _b._emitter()
         ns = int(num_stages or getattr(self, "num_stages", 2))
         one = _b.const_i32(1)
@@ -144,7 +144,7 @@ def sync(barrier_id: int = 0, aligned: bool = False):
 
 def _bar_at(storage_ptr, index_ssa):
     """mbarrier address = storage_ptr + index*8 bytes (Int64 smem array);
-    stays in addrspace(3) — TMA ops consume !llvm.ptr<3> barriers."""
+    stays in addrspace(3) - TMA ops consume !llvm.ptr<3> barriers."""
     e = _b._emitter()
     off = e.ssa("i64", f"arith.extsi {index_ssa.name} : i32 to i64")
     p = e.ssa("!llvm.ptr<3>",
@@ -178,7 +178,7 @@ class PipelineTmaAsync:
         e = _b._emitter()
         # two-barrier protocol (the 2*num_stages storage exists for this):
         # FULL[s] count=1 (expect_tx arrival + tx bytes) = data ready;
-        # EMPTY[s] count = consumer warp count — lane0 of every consumer
+        # EMPTY[s] count = consumer warp count - lane0 of every consumer
         # warp arrives, so a stage frees only after ALL warps' register
         # loads are past it (one rep thread would race the others)
         tidx = e.thread_id("x")
@@ -236,7 +236,7 @@ class PipelineTmaAsync:
 
     def consumer_wait(self, state: PipelineState, peek_status=None):
         """Wait parity == state.phase + async-proxy fence (verified M5/M6
-        protocol); peek_status is an optimization hint — the wait itself is
+        protocol); peek_status is an optimization hint - the wait itself is
         authoritative and idempotent on an already-completed phase."""
         e = _b._emitter()
         bar = _bar_at(self.barrier_storage, state.stage)
@@ -263,7 +263,7 @@ class PipelineTmaAsync:
     # ------------------------------------------------------------------
     @staticmethod
     def increment_state(state: PipelineState, num_stages: int):
-        """stage+1 (wrap), phase flips on wrap — SSA arithmetic."""
+        """stage+1 (wrap), phase flips on wrap - SSA arithmetic."""
         e = _b._emitter()
         one = _b.const_i32(1)
         ns = _b.const_i32(int(num_stages))

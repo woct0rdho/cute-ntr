@@ -1,4 +1,4 @@
-"""cutlass.utils — hardware info, layout enums, smem helpers, persistent
+"""cutlass.utils - hardware info, layout enums, smem helpers, persistent
 tile scheduler (compat, clean-room from CUTLASS C++ semantics + BSD
 example call shapes; the official wheel implementation is not read)."""
 from __future__ import annotations
@@ -48,6 +48,7 @@ class LayoutEnum:
 
 LayoutEnum.ROW_MAJOR = LayoutEnum(LayoutEnum._ROW_MAJOR)
 LayoutEnum.COLUMN_MAJOR = LayoutEnum(LayoutEnum._COLUMN_MAJOR)
+LayoutEnum.COL_MAJOR = LayoutEnum.COLUMN_MAJOR
 
 
 class HardwareInfo:
@@ -60,7 +61,7 @@ class HardwareInfo:
         self.threads_per_wave = 32 * self.sm_count
         # This profile launches clusters of (1,1,1) only, so the resident
         # wave is one CTA per SM. Persistent kernels size their grid from
-        # this value — the old placeholder of 1 collapsed the b12x MoE onto
+        # this value - the old placeholder of 1 collapsed the b12x MoE onto
         # a single CTA (~130x slowdown at realistic shapes).
         self.max_active_clusters = self.sm_count
 
@@ -183,7 +184,7 @@ class AlignSpec:
 
 
 def _struct_decorator(cls):
-    """@cute.struct — collect MemRange/Align fields into __struct_fields__.
+    """@cute.struct - collect MemRange/Align fields into __struct_fields__.
 
     Official bodies use annotation form (`sA: cute.struct.Align[...]`),
     so collect from __annotations__ (evaluated specs) as well as plain
@@ -332,7 +333,7 @@ class PersistentTileSchedulerParams:
 
 
 class _PersistentGrid(tuple):
-    """Grid whose scheduler consumes a single linear ``ctaid.x``."""
+    """Grid whose scheduler consumes a single linear `ctaid.x`."""
 
     flatten_x = True
 
@@ -343,10 +344,10 @@ class _PersistentGrid(tuple):
 class StaticPersistentTileScheduler:
     """Persistent tile scheduler. Trace model: when the launch grid covers
     every tile (the get_grid_shape default), each CTA owns exactly one tile
-    — is_valid_tile is compile-time True at entry and False after advance,
+    - is_valid_tile is compile-time True at entry and False after advance,
     so the persistent while-loop traces as a single trip (semantically
     exact for this configuration class). Oversubscribed grids (more tiles
-    than CTAs) are an honest boundary — recorded, not silently wrong."""
+    than CTAs) are an honest boundary - recorded, not silently wrong."""
 
     def __init__(self, params, bidx_ssa, grid_ssa):
         self.params = params

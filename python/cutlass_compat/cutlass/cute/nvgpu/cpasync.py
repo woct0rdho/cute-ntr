@@ -1,4 +1,4 @@
-"""cutlass.cute.nvgpu.cpasync — TMA atom object model (compat)."""
+"""cutlass.cute.nvgpu.cpasync - TMA atom object model (compat)."""
 from __future__ import annotations
 
 from . import LoadCacheMode

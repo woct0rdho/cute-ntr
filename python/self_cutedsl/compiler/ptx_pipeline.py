@@ -1,4 +1,4 @@
-"""ptx_pipeline.py — drive the open MLIR → NVIDIA PTX pipeline from Python.
+"""ptx_pipeline.py - drive the open MLIR -> NVIDIA PTX pipeline from Python.
 
 Stages (all open-source):
   1. cutlass-compiler (BSD) : one-shot-convert-to-llvm
@@ -57,6 +57,49 @@ def _unescape(s: str) -> str:
     )
 
 
+def _apply_entry_directives(ptx: str, directives: list[str]) -> str:
+    """Insert per-entry performance-tuning directives (`.maxnreg`, `.minnctapersm`).
+
+    PTX ISA 11.4: "the .maxnreg, .maxntid, .reqntid, and .minnctapersm
+    directives may be applied per-entry and must appear between an .entry
+    directive and its body" - placing them inside the body is rejected by
+    ptxas, and the driver's JIT (the runtime path here, which loads textual
+    PTX rather than a cubin) offers no other way to set them.
+
+    `.minnctapersm` is the better occupancy knob of the two: it lets ptxas
+    choose the register count that fits N CTAs per SM instead of capping
+    registers blindly.  The D64 attention kernel sits at 157 registers, which
+    limits it to 3 CTAs per SM when shared memory would allow 4.
+    """
+    body = ", ".join("\\t" + str(d) for d in directives)
+    if not directives:
+        return ptx
+    out, i = [], 0
+    lines = ptx.splitlines()
+    while i < len(lines):
+        line = lines[i]
+        if line.lstrip().startswith(".visible .entry") \
+                or line.lstrip().startswith(".entry"):
+            out.append(line)
+            i += 1
+            while i < len(lines) and not lines[i].rstrip().endswith("{"):
+                out.append(lines[i])
+                i += 1
+            out.append("\t" + ", ".join(str(d) for d in directives))
+            if i < len(lines):
+                out.append(lines[i])
+            i += 1
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out) + "\n"
+
+
+def _apply_maxnreg(ptx: str, limit: int) -> str:
+    """Backwards-compatible wrapper: a single `.maxnreg` directive."""
+    return _apply_entry_directives(ptx, [f".maxnreg {int(limit)}"])
+
+
 def compile_mlir_to_ptx(
     mlir_text: str | Path,
     extra_passes: list[str] | None = None,
@@ -64,8 +107,8 @@ def compile_mlir_to_ptx(
 ) -> str:
     """Compile an MLIR module (gpu.container_module) to textual PTX.
 
-    ``target`` is an NVVM/NVPTX chip string such as ``sm_86`` or ``sm_120a``.
-    The default remains ``sm_120a`` for backwards compatibility.
+    `target` is an NVVM/NVPTX chip string such as `sm_86` or `sm_120a`.
+    The default remains `sm_120a` for backwards compatibility.
     """
     if isinstance(mlir_text, Path):
         mlir_text = mlir_text.read_text()

@@ -1,4 +1,4 @@
-"""builtins.py — cute.* device builtins routed into the active trace.
+"""builtins.py - cute.* device builtins routed into the active trace.
 
 The interpreter publishes the active KernelInterpreter in `_active`; the
 compat `cute` module calls these. State is per-trace, single-threaded.
@@ -18,7 +18,7 @@ def _emitter():
 
 
 class _Arch:
-    """cute.arch — device intrinsics."""
+    """cute.arch - device intrinsics."""
 
     def thread_idx(self):
         e = _emitter()
@@ -41,9 +41,9 @@ class _Arch:
     def warp_idx(self):
         """Linear warp id (tid / 32) as a warp-uniform scalar.
 
-        Official CuTeDSL semantics: kernels compare ``warp_idx == 0`` and
+        Official CuTeDSL semantics: kernels compare `warp_idx == 0` and
         do arithmetic on it (flashinfer fp4_common block_reduce computes
-        ``warp_idx // warps_per_row``). The earlier (wid, 0, 0) tuple only
+        `warp_idx // warps_per_row`). The earlier (wid, 0, 0) tuple only
         survived because make_warp_uniform happened to project element 0.
         """
         e = _emitter()
@@ -128,7 +128,7 @@ def make_tiled_copy_tv(atom, thr_layout, val_layout):
 
 
 def partition_for_thread(tiled_copy, tile):
-    """tiled_copy.get_slice(tidx).partition_S/D(tile) — lowered here so the
+    """tiled_copy.get_slice(tidx).partition_S/D(tile) - lowered here so the
     thread-origin math is emitted as SSA index arithmetic."""
     from .kernel_objects import BlockTile, ThreadOrigin, ThrPartition
 
@@ -166,6 +166,17 @@ def make_fragment_like(part):
 def make_rmem_tensor(shape, dtype):
     from .kernel_objects import Fragment
     from .meta import BOOL
+
+    from .cute_objects import AccumulatorShape as _AccShape
+
+    if isinstance(shape, _AccShape):
+        fragment = Fragment(
+            shape.count,
+            BOOL if getattr(dtype, "name", "") in ("bool", "Boolean")
+            else dtype)
+        fragment.mma_shape = shape.shape
+        fragment.dims = shape.shape
+        return fragment
 
     def _flatten_shape(x):
         out = []
@@ -213,7 +224,7 @@ def elem_less(coord, shape):
 
 
 def copy(atom, src, dst, pred=None):
-    """cute.copy(atom, src, dst, pred=frag) — M2 per-value predicated ld/st.
+    """cute.copy(atom, src, dst, pred=frag) - M2 per-value predicated ld/st.
 
     NOTE: a second `copy` definition further down this module (TMA
     partitioned dispatch) is the one Python actually binds; it forwards
@@ -372,7 +383,7 @@ def _get_tidx():
 
 # ------------------------------------------------------------------ smem + mma
 class SmemArray:
-    """cute.make_smem_array(name, count, element) — shared-memory buffer."""
+    """cute.make_smem_array(name, count, element) - shared-memory buffer."""
 
     def __init__(self, ptr, count, elem):
         self.ptr = ptr          # SSA !llvm.ptr<3>
@@ -381,12 +392,18 @@ class SmemArray:
 
     def get_tensor(self, layout=None, swizzle=None):
         """Official storage.sX.get_tensor(outer, swizzle=inner): returns the
-        SMEM tensor view — a Tensor whose base is this array, so tile
+        SMEM tensor view - a Tensor whose base is this array, so tile
         algebra (group_modes/partition) carries the pointer along."""
         from .cute_objects import Tensor as HostTensor, Layout as HostLayout
 
         if layout is None:
             return self
+        if hasattr(layout, "outer") and hasattr(layout, "stages"):
+            # ComposedLayoutStaged from tile_to_shape/make_composed_layout:
+            # the swizzle rides along on the outer/inner split.
+            if swizzle is None:
+                swizzle = getattr(layout, "inner", None)
+            layout = layout.outer
         if hasattr(layout, "shape") and hasattr(layout, "stride") \
                 and not isinstance(layout, HostLayout):
             from .cute_objects import Layout as _L
@@ -437,7 +454,7 @@ def make_tiled_mma(atom, atom_layout=None):
 
     # keep the real op (block-scaled ops carry shape_mnk like (16,8,64)
     # that the copy/gemm paths branch on); f16 call sites pass the plain
-    # MmaF16BF16Op marker which has no shape — wrap it for compatibility
+    # MmaF16BF16Op marker which has no shape - wrap it for compatibility
     op = atom if hasattr(atom, "shape_mnk") else MmaF16BF16OpAtom()
     return TiledMma(op, atom_layout)
 
@@ -505,7 +522,8 @@ def mbarrier_try_wait_parity(bar, phase: int):
     e.mbarrier_try_wait_parity(bar, phase)
 
 
-def make_smem_tile(name: str, count: int, element=None, align: int = 128):
+def make_smem_tile(name: str, count: int, element=None, align: int = 128,
+                   dynamic: bool = False):
     from .meta import F32
 
     e = _emitter()
@@ -513,7 +531,8 @@ def make_smem_tile(name: str, count: int, element=None, align: int = 128):
     mlir = {"f32": "f32", "f16": "f16", "bf16": "bf16",
             "float32": "f32", "float16": "f16",
             "bfloat16": "bf16"}.get(elem.name.lower(), "f32")
-    ptr = e.smem_tile_declare(name, int(count), mlir, align=align)
+    ptr = e.smem_tile_declare(name, int(count), mlir, align=align,
+                              dynamic=bool(dynamic))
     return SmemArray(ptr, int(count), elem)
 
 
@@ -534,7 +553,7 @@ def named_barrier_sync(id_: int, count: int):
 def make_tiled_tma_atom(op, gmem_tensor, smem_layout_or_tensor, cta_layout=None):
     """Host-side (jit body) TMA atom construction, dense_gemm-style.
 
-    gmem_tensor: TensorMeta (or CUtensorMapView.source meta) — its shape
+    gmem_tensor: TensorMeta (or CUtensorMapView.source meta) - its shape
     plus the smem tile layout define the box; the kernel-side descriptor
     pointer comes from the TmaTensor kernel param at launch.
     """
@@ -749,7 +768,7 @@ def _warp_mn_coord(e, mma, wid, warps_m, warps_n):
 
 
 def _lane0_predicate():
-    """i1 SSA: one convergently elected issuer per warp — elect.sync
+    """i1 SSA: one convergently elected issuer per warp - elect.sync
     picks the lowest ACTIVE lane, which is the correct leader under
     divergence (a fixed lane==0 test can elect nobody when lane 0 is
     not in the executing subset, deadlocking the mbarrier)."""
@@ -761,41 +780,67 @@ def _lane0_predicate():
 
 
 def _is_swizzle_128b(swizzle):
-    return all(
-        getattr(swizzle, name, None) == expected
-        for name, expected in (("b", 3), ("m", 4), ("s", 3))
-    )
+    return _swizzle_bits(swizzle) == 3
+
+
+def _swizzle_bits(swizzle):
+    """`B` of a `Swizzle<B,4,3>` shared-memory swizzle, else 0.
+
+    `B` is `log2(row_elems / 8)`: 3 for a 64-half row (128 B), 4 for a
+    128-half row (256 B).  Both XOR the whole 16-byte chunk index inside a
+    row with the row index, which is what keeps 16-byte ldmatrix reads
+    conflict-free and 16-byte vector reads contiguous.
+    """
+    if getattr(swizzle, "m", None) != 4 or getattr(swizzle, "s", None) != 3:
+        return 0
+    bits = int(getattr(swizzle, "b", 0) or 0)
+    return bits if bits in (3, 4) else 0
 
 
 def _swizzle_f16(e, offset, swizzle_bits):
     """Apply CuTe's Swizzle<B,4,3> to an f16 element offset.
 
     For f16 elements the byte-level Swizzle<B,4,3> becomes
-    ``x ^ (((x >> 6) & ((1 << B) - 1)) << 3)``. B is selected from
+    `x ^ (((x >> 6) & ((1 << B) - 1)) << 3)`. B is selected from
     the 128-bit copy width and the leading shared-memory dimension.
     """
     if not swizzle_bits:
         return offset
-    offset64 = e.ssa(
-        "i64", f"arith.index_cast {offset.name} : index to i64")
-    shift6 = e.ssa("i64", "arith.constant 6 : i64")
+    offset32 = e.ssa(
+        "i32", f"arith.index_cast {offset.name} : index to i32")
+    shift6 = e.ssa("i32", "arith.constant 6 : i32")
     row_bits = e.ssa(
-        "i64", f"arith.shrui {offset64.name}, {shift6.name} : i64")
+        "i32", f"arith.shrui {offset32.name}, {shift6.name} : i32")
     mask = e.ssa(
-        "i64", f"arith.constant {(1 << int(swizzle_bits)) - 1} : i64")
+        "i32", f"arith.constant {(1 << int(swizzle_bits)) - 1} : i32")
     row_bits = e.ssa(
-        "i64", f"arith.andi {row_bits.name}, {mask.name} : i64")
-    shift3 = e.ssa("i64", "arith.constant 3 : i64")
+        "i32", f"arith.andi {row_bits.name}, {mask.name} : i32")
+    shift3 = e.ssa("i32", "arith.constant 3 : i32")
     xor_bits = e.ssa(
-        "i64", f"arith.shli {row_bits.name}, {shift3.name} : i64")
+        "i32", f"arith.shli {row_bits.name}, {shift3.name} : i32")
     physical = e.ssa(
-        "i64", f"arith.xori {offset64.name}, {xor_bits.name} : i64")
+        "i32", f"arith.xori {offset32.name}, {xor_bits.name} : i32")
     return e.ssa(
-        "index", f"arith.index_cast {physical.name} : i64 to index")
+        "index", f"arith.index_cast {physical.name} : i32 to index")
 
 
 def _swizzle_128b_f16(e, offset):
     return _swizzle_f16(e, offset, 3)
+
+
+def _swizzle_128b_row_col(e, row, col, row_stride, bits: int = 3):
+    """`S<B,4,3>` for a row of `8 << bits` half elements."""
+    mask = e.idx_const((1 << int(bits)) - 1)
+    shift = e.idx_const(3)
+    row_low = e.ssa("index", f"arith.andi {row.name}, "
+                     f"{mask.name} : index")
+    xor_bits = e.ssa("index", f"arith.shli {row_low.name}, "
+                      f"{shift.name} : index")
+    physical_col = e.ssa("index", f"arith.xori {col.name}, "
+                          f"{xor_bits.name} : index")
+    return e.idx_binop(
+        "arith.addi", e.idx_binop("arith.muli", row, row_stride),
+        physical_col)
 
 
 def _origin_offset(e, tensor):
@@ -818,7 +863,7 @@ def copy_mma_to_gmem(tc, acc, dst):
     """Lower an official-style MMA C tiled copy to global stores.
 
     The lane/register mapping is kept in this backend trait implementation;
-    the kernel sees only ``partition_C`` and ``cute.copy``.  This preserves
+    the kernel sees only `partition_C` and `cute.copy`.  This preserves
     the validated scalar epilogue instruction schedule while making the
     source-level ownership model reusable by other MMA kernels.
     """
@@ -911,8 +956,9 @@ def copy_tiled(tc, src, dst):
 
     mma = tc.mma
     am, an, ak = getattr(mma.op, "shape_mnk", (16, 8, 16))
-    use_swizzle = ak < 64 and _is_swizzle_128b(
+    swizzle_bits = 0 if ak >= 64 else _swizzle_bits(
         getattr(tile, "swizzle", None))
+    use_swizzle = bool(swizzle_bits)
     warps_m = int(_flatten(mma.atom_layout)[0]) if mma.atom_layout else 1
     warp_m, warp_n = mma.tile_mn
     if ak >= 64:                        # SM120 block-scaled warp grid
@@ -965,12 +1011,16 @@ def copy_tiled(tc, src, dst):
                           _ixop(e, "arith.remsi", lane, _ix(e, 16)))
             half8 = _ixop(e, "arith.muli",
                           _ixop(e, "arith.divsi", lane, _ix(e, 16)), _ix(e, 8))
-            off = _ixop(e, "arith.addi", soff,
-                        _ixop(e, "arith.addi",
-                              _ixop(e, "arith.muli", m_row, row_str),
-                              _ixop(e, "arith.addi", k0, half8)))
+            col = _ixop(e, "arith.addi", k0, half8)
             if use_swizzle:
-                off = _swizzle_128b_f16(e, off)
+                logical = _swizzle_128b_row_col(
+                    e, m_row, col, row_str, swizzle_bits)
+                off = _ixop(e, "arith.addi", soff, logical)
+            else:
+                off = _ixop(e, "arith.addi", soff,
+                            _ixop(e, "arith.addi",
+                                  _ixop(e, "arith.muli", m_row, row_str),
+                                  col))
             f = e.ldmatrix(e.gep_smem(arr.ptr, off), 4, trans=False)
             regs.extend(e.extract_i32(f, j) for j in range(4))
         dst.frag.slots[dst.k] = regs
@@ -998,27 +1048,77 @@ def copy_tiled(tc, src, dst):
                 regs.append(e.ssa("i32",
                                   f"llvm.load {p.name} : !llvm.ptr<3> -> i32"))
         dst.frag.slots[dst.k] = regs
-    else:
-        # Row-major B is physically (K,N):(N,1).  The transposed ldmatrix
-        # operand takes each lane's K-row address and the atom's N-column
-        # offset; the old compatibility path accidentally exchanged these
-        # coordinates and could address beyond a short-K shared tile.
+    elif bool(getattr(getattr(tc.atom, "op", None), "trans", True)):
+        # Row-major B stored as (K,N):(N,1).  The transposed ldmatrix operand
+        # takes each lane's K-row address and the atom's N-column offset.
+        #
+        # An x2 atom covers one 8-wide N atom and needs lanes 0-15 for the
+        # two k-halves; an x4 atom covers two N atoms with lanes 16-31
+        # supplying the second one, which halves the ldmatrix count and is
+        # what the official kernels use for V.  Register order stays
+        # (n_atom0 b0, n_atom0 b1, n_atom1 b0, n_atom1 b1), the order
+        # `gemm_tv` reads B fragments in.
+        num = int(getattr(tc.atom.op, "num", 2) or 2)
+        if num not in (2, 4):
+            num = 2
+        step = num // 2                      # N atoms per instruction
         regs = []
-        for na in range(mn):
+        for na in range(0, mn, step):
             n_col = _ixop(e, "arith.addi",
                           _ixop(e, "arith.muli", wn, _ix(e, warp_n)),
                           _ix(e, na * 8))
             k_row = _ixop(e, "arith.addi", k0,
                           _ixop(e, "arith.remsi", lane, _ix(e, 16)))
-            off = _ixop(e, "arith.addi", soff,
-                        _ixop(e, "arith.addi",
-                              _ixop(e, "arith.muli", k_row, row_str),
-                              n_col))
+            if step == 2:
+                # second 8-wide N atom: lanes 16-31 address it
+                n_col = _ixop(
+                    e, "arith.addi", n_col,
+                    _ixop(e, "arith.muli",
+                          _ixop(e, "arith.divsi", lane, _ix(e, 16)),
+                          _ix(e, 8)))
             if use_swizzle:
-                off = _swizzle_128b_f16(e, off)
-            trans = bool(getattr(getattr(tc.atom, "op", None), "trans", True))
-            f = e.ldmatrix(e.gep_smem(arr.ptr, off), 2, trans=trans)
-            regs.extend(e.extract_i32(f, j) for j in range(2))
+                logical = _swizzle_128b_row_col(
+                    e, k_row, n_col, row_str, swizzle_bits)
+                off = _ixop(e, "arith.addi", soff, logical)
+            else:
+                off = _ixop(e, "arith.addi", soff,
+                            _ixop(e, "arith.addi",
+                                  _ixop(e, "arith.muli", k_row, row_str),
+                                  n_col))
+            f = e.ldmatrix(e.gep_smem(arr.ptr, off), num, trans=True)
+            regs.extend(e.extract_i32(f, j) for j in range(num))
+        dst.frag.slots[dst.k] = regs
+    else:
+        # Native B stored as (N,K):(K,1) -- the operand's own orientation, so
+        # the producer can fill it with plain cp.async.  A non-transposed x4
+        # ldmatrix covers 16 N rows x 16 K columns in the canonical 2x2
+        # arrangement: lanes 0-15 address the rows at K[0:8], lanes 16-31 the
+        # same rows at K[8:16].  That yields, per 8-row N atom, the pair of
+        # registers (K[0:8], K[8:16]) the m16n8k16 B fragment wants.
+        regs = []
+        n_base = _ixop(e, "arith.muli", wn, _ix(e, warp_n))
+        for na in range(0, mn, 2):
+            n_row = _ixop(
+                e, "arith.addi",
+                _ixop(e, "arith.addi", n_base, _ix(e, na * 8)),
+                _ixop(e, "arith.remsi", lane, _ix(e, 16)))
+            k_col = _ixop(
+                e, "arith.addi", k0,
+                _ixop(e, "arith.muli",
+                      _ixop(e, "arith.divsi", lane, _ix(e, 16)), _ix(e, 8)))
+            if use_swizzle:
+                logical = _swizzle_128b_row_col(
+                    e, n_row, k_col, row_str, swizzle_bits)
+                off = _ixop(e, "arith.addi", soff, logical)
+            else:
+                off = _ixop(e, "arith.addi", soff,
+                            _ixop(e, "arith.addi",
+                                  _ixop(e, "arith.muli", n_row, row_str),
+                                  k_col))
+            f = e.ldmatrix(e.gep_smem(arr.ptr, off), 4, trans=False)
+            d = [e.extract_i32(f, j) for j in range(4)]
+            # d0/d2 = low/high K halves of N rows [0:8), d1/d3 of [8:16)
+            regs.extend([d[0], d[2], d[1], d[3]])
         dst.frag.slots[dst.k] = regs
 
 
@@ -1045,6 +1145,81 @@ def gemm_tv(mma, acc, a_k, b_k):
                 acc.slots[c0 + j] = out[j]
 
 
+def reshape_acc_to_frgA(acc):
+    """Reinterpret a score fragment as the `P@V` A operand, in registers.
+
+    This is the register-only counterpart of staging `P` through shared
+    memory and re-loading it with `ldmatrix`.  The MMA accumulator layout
+    `(4, MMA_M, MMA_N)` already holds, in each thread, exactly the FP16
+    pairs the `m16n8k16` A operand wants: accumulator columns
+    `(2c, 2c+1)` of n-atom `a` and `a+1` form the k-low and k-high
+    halves of that atom's A registers.  Nothing is moved - only re-paired.
+
+    A fragment that is already packed (`packed_f16x2`, produced by the
+    fused softmax conversion) skips the pack step; its slots hold one half2
+    register per score pair, so this is a pure register re-index.
+    """
+    from .cute_objects import FragK
+    from .kernel_objects import Fragment
+
+    e = _emitter()
+    frag = getattr(acc, "frag", acc)
+    assert isinstance(frag, Fragment)
+    _, mm, mn = getattr(frag, "mma_shape", (4, frag.count // 4 // 4, 4))
+    n_kblocks = mn // 2
+    out = Fragment(mm * n_kblocks * 4, frag.dtype, name="tOrS")
+
+    if getattr(frag, "packed_f16x2", False):
+        for i in range(mm):
+            for kb in range(n_kblocks):
+                lo_a, hi_a = 2 * kb, 2 * kb + 1
+                for slot, (na, j0) in enumerate(
+                        ((lo_a, 0), (lo_a, 2), (hi_a, 0), (hi_a, 2))):
+                    out.slots[(i * n_kblocks + kb) * 4 + slot] = \
+                        frag.slots[(i * mn + na) * 4 + j0]
+        return _FrgAView(out, mm, n_kblocks)
+
+    for i in range(mm):
+        for kb in range(n_kblocks):
+            lo_a, hi_a = 2 * kb, 2 * kb + 1
+            packed = []
+            for na, j0 in ((lo_a, 0), (lo_a, 2), (hi_a, 0), (hi_a, 2)):
+                base = (i * mn + na) * 4 + j0
+                reg = e.pack_f16x2(frag.slots[base], frag.slots[base + 1])
+                packed.append(reg)
+            for slot, reg in enumerate(packed):
+                out.slots[(i * n_kblocks + kb) * 4 + slot] = reg
+    return _FrgAView(out, mm, n_kblocks)
+
+
+class _FrgAView:
+    """Fragment sliceable as an MMA A operand: `view[None, None, k]`."""
+
+    def __init__(self, frag, mm, n_kblocks):
+        self.frag = frag
+        self.mm = mm
+        self.n_kblocks = n_kblocks
+        self.count = frag.count
+
+    @property
+    def slots(self) -> dict:
+        # gemm_tv reads slots[k] as 4 registers per M atom, atom-major
+        return {
+            k: [self.frag.slots[(i * self.n_kblocks + k) * 4 + j]
+                for i in range(self.mm) for j in range(4)]
+            for k in range(self.n_kblocks)
+        }
+
+    def __getitem__(self, idx):
+        from .cute_objects import FragK
+
+        if isinstance(idx, tuple):
+            k = idx[2]
+        else:
+            k = idx
+        return FragK(self, int(getattr(k, "value", k)), 0)
+
+
 def copy_r2s(tc, src, dst):
     """cute.copy(tiled_copy_r2s, tRS_rD_out, tRS_sD[(..., buf)]): store the
     thread's converted accumulator regs to sC at the trait C coordinates
@@ -1066,6 +1241,8 @@ def copy_r2s(tc, src, dst):
     lay = tile.layout
     flat_shp = [int(d) for d in _flatten(lay.shape)]
     flat_str = [int(d) for d in _flatten(lay.stride)]
+    swizzle_bits = _swizzle_bits(getattr(tile, "swizzle", None))
+    use_swizzle = bool(swizzle_bits)
     elems_per_stage = flat_shp[0] * flat_shp[1]
     stage_stride = flat_str[2] if len(flat_str) > 2 else elems_per_stage
     win = smem_stage(arr, dst.stage, stage_stride)
@@ -1118,25 +1295,32 @@ def copy_r2s(tc, src, dst):
                 # applies when the CTA M extent equals one warp column
                 # (warps_m <= 2); taller CTA grids (warps_m >= 4) keep the
                 # atom-major four-value groups. Derived from the mma's
-                # atom_layout — no per-operator special casing.
+                # atom_layout - no per-operator special casing.
                 paired = ak >= 64 and warps_m <= 2
                 c0 = (((i // 2) * mn + na) * 8 + (i % 2) * 4 + j
                        if paired else (i * mn + na) * 4 + j)
                 v = frag.slots.get(c0)
                 if v is None:
                     continue
-                # j: 0 (r,c) 1 (r,c+1) 2 (r+8,c) 3 (r+8,c+1) — trait C coords
+                # j: 0 (r,c) 1 (r,c+1) 2 (r+8,c) 3 (r+8,c+1) - trait C coords
                 r8 = _ix(e, 8 if j >= 2 else 0)
                 c1 = _ix(e, 1 if j % 2 == 1 else 0)
                 row = _ixop(e, "arith.addi", _ixop(e, "arith.addi",
                                                    row_base, group), r8)
                 col = _ixop(e, "arith.addi", col_base,
                             _ixop(e, "arith.addi", t2, c1))
-                off = _ixop(e, "arith.addi", soff,
-                            _ixop(e, "arith.addi",
-                                  _ixop(e, "arith.muli", row, row_str), col))
+                if use_swizzle:
+                    logical = _swizzle_128b_row_col(
+                        e, row, col, row_str, swizzle_bits)
+                    off = _ixop(e, "arith.addi", soff, logical)
+                else:
+                    off = _ixop(e, "arith.addi", soff,
+                                _ixop(e, "arith.addi",
+                                      _ixop(e, "arith.muli", row, row_str),
+                                      col))
                 p = e.gep_smem(arr.ptr, off, ety)
-                e.raw(f"llvm.store {v.name}, {p.name} : {vty}, !llvm.ptr<3>")
+                e.raw(f"llvm.store {v.name}, {p.name} : {vty}, "
+                       "!llvm.ptr<3>")
 
 
 def frag_to(view, dtype):
@@ -1226,7 +1410,7 @@ def copy_sf(tc, src, dst):
     # four scale factors per row (sf_vec=16), and all 128 rows precede
     # the next K64 block:
     #   byte = kb * (rows * 4) + (row%32)*16 + (row//32)*4 + kg
-    # The old ``kb * 4`` selected the next M32 quadrant instead of the
+    # The old `kb * 4` selected the next M32 quadrant instead of the
     # next K64 block, so kg0..3 were applied twice and kg4..7 were never
     # consumed for a 128-wide K tile.
     def _sf_off(row):
@@ -1294,7 +1478,7 @@ def _pack_bytes(e, lo, hi):
 
 def gemm_bs(mma, acc, a_list, b_list):
     """cute.gemm(mma, acc, [tCrA[k], tCrSFA[k]], [tCrB[k], tCrSFB[k]], acc)
-    — block-scaled: kind::mxf4nvf4 per (m_atom, n_atom) over the warp grid.
+    - block-scaled: kind::mxf4nvf4 per (m_atom, n_atom) over the warp grid.
     First-guess register mapping (calibrate vs PTX): A regs from the fp4
     ldmatrix path, SF bytes from copy_sf slots."""
     e = _emitter()
@@ -1529,7 +1713,7 @@ def const_f32(v):
 
 
 def exp_f32(v):
-    """cute.exp — f32 exp via ex2.approx PTX: exp(x) = ex2(x*log2e)."""
+    """cute.exp - f32 exp via ex2.approx PTX: exp(x) = ex2(x*log2e)."""
     e = _emitter()
     l2e = e.ssa("f32", "arith.constant 1.4426950408889634 : f32")
     x = e.ssa("f32", f"arith.mulf {v.name}, {l2e.name} : f32")
@@ -1546,9 +1730,393 @@ def fptrunc_f16(v):
 
 
 def fmax_f32(a, b):
+    """NaN-free max, one instruction.
+
+    `arith.cmpf ogt` + `arith.select` (what this used to emit) is two
+    ALU-pipe instructions; `arith.maxnumf` lowers to a single `max.f32`
+    (FMNMX), which is what the official and FA4 kernels use for the online
+    softmax row max.
+    """
     e = _emitter()
-    c = e.ssa("i1", f"arith.cmpf ogt, {a.name}, {b.name} : f32")
-    return e.ssa("f32", f"arith.select {c.name}, {a.name}, {b.name} : f32")
+    a, b = _f32_value(a), _f32_value(b)
+    return e.ssa("f32", f"arith.maxnumf {a.name}, {b.name} : f32")
+
+
+def _f32_value(v):
+    if hasattr(v, "ssa"):
+        if v.ssa is None:
+            v.ir_value()
+        return v.ssa
+    if isinstance(v, (int, float)):
+        return _emitter().ssa(
+            "f32", f"arith.constant {float(v)!r} : f32")
+    return v
+
+
+def _exp2_f32(v):
+    e = _emitter()
+    v = _f32_value(v)
+    return e.ssa(
+        "f32",
+        'nvvm.inline_ptx "ex2.approx.f32 $0, $1;" '
+        f"ro ({v.name} : f32) -> f32",
+    )
+
+
+def _fma_f32(a, b, c):
+    """`a * b + c` in one rounded instruction.
+
+    The online-softmax update is `exp2(score * scale - offset)`; emitting it
+    as a multiply and a subtract costs an extra instruction per element and
+    was the reason this kernel produced no FFMA at all while the official one
+    produces dozens.
+    """
+    e = _emitter()
+    a, b, c = _f32_value(a), _f32_value(b), _f32_value(c)
+    return e.ssa(
+        "f32",
+        f"math.fma {a.name}, {b.name}, {c.name} : f32",
+    )
+
+
+def _neg_f32(v):
+    e = _emitter()
+    v = _f32_value(v)
+    return e.ssa("f32", f"arith.negf {v.name} : f32")
+
+
+def _shuffle_bfly_f32(v, offset):
+    e = _emitter()
+    v = _f32_value(v)
+    off = e.ssa("i32", f"arith.constant {int(offset)} : i32")
+    vi = e.ssa("i32", f"llvm.bitcast {v.name} : f32 to i32")
+    ri = e.ssa(
+        "i32",
+        'nvvm.inline_ptx "shfl.sync.bfly.b32 $0, $1, $2, 31, -1;" '
+        f"ro ({vi.name}, {off.name} : i32, i32) -> i32",
+    )
+    return e.ssa("f32", f"llvm.bitcast {ri.name} : i32 to f32")
+
+
+def _cvt_f16x2(lo, hi):
+    """`cvt.rn.f16x2.f32`: round two f32 to one packed half2 register.
+
+    The scalar form costs two `cvt.rn.f16.f32` plus a register move to
+    combine them; the vector form is a single instruction and is what the
+    official Ampere kernels emit for the probability fragment.
+    """
+    e = _emitter()
+    lo, hi = _f32_value(lo), _f32_value(hi)
+    undef = e.ssa("vector<2xf32>",
+                  '"llvm.mlir.undef"() : () -> vector<2xf32>')
+    c0 = e.ssa("i32", "arith.constant 0 : i32")
+    c1 = e.ssa("i32", "arith.constant 1 : i32")
+    v0 = e.ssa("vector<2xf32>",
+               f"llvm.insertelement {lo.name}, {undef.name}[{c0.name} : i32] "
+               f": vector<2xf32>")
+    v1 = e.ssa("vector<2xf32>",
+               f"llvm.insertelement {hi.name}, {v0.name}[{c1.name} : i32] "
+               f": vector<2xf32>")
+    h = e.ssa("vector<2xf16>",
+              f"arith.truncf {v1.name} : vector<2xf32> to vector<2xf16>")
+    return e.ssa("i32", f"llvm.bitcast {h.name} : vector<2xf16> to i32")
+
+
+def _row_max_reduce(v):
+    v = fmax_f32(v, _shuffle_bfly_f32(v, 1))
+    v = fmax_f32(v, _shuffle_bfly_f32(v, 2))
+    return v
+
+
+def _row_sum_reduce(v):
+    e = _emitter()
+    a = e.ssa("f32", f"arith.addf {v.name}, "
+               f"{_shuffle_bfly_f32(v, 1).name} : f32")
+    b = _shuffle_bfly_f32(a, 2)
+    return e.ssa("f32", f"arith.addf {a.name}, {b.name} : f32")
+
+
+def _smem_f32_load(arr, offset):
+    e = _emitter()
+    ptr = e.gep_smem(arr.ptr, offset, "f32")
+    return e.ssa("f32", f"llvm.load {ptr.name} : !llvm.ptr<3> -> f32")
+
+
+def _smem_f32_store(arr, offset, value):
+    e = _emitter()
+    ptr = e.gep_smem(arr.ptr, offset, "f32")
+    e.raw(f"llvm.store {value.name}, {ptr.name} : f32, !llvm.ptr<3>")
+
+
+def _online_softmax_single_warp(acc_s, outputs, row_max, row_sum,
+                                scale_log2):
+    """Online softmax when one warp owns every N column for each row."""
+    from .kernel_objects import Fragment
+    from .meta import F16, I32
+
+    e = _emitter()
+    scale = _f32_value(scale_log2)
+    row_states = row_max.count
+    # one warp owns all N columns of its row slice: the atom grid is
+    # (row_states/2) x mn, so mn follows from the fragment width
+    mn = acc_s.count // (4 * max(1, row_states // 2))
+    # Probabilities are produced already packed as half2, in the same
+    # (4, MMA_M, MMA_N) index space as the scores: slot (base, base+1) of the
+    # score fragment become the single packed register at slot base.
+    packed = Fragment(acc_s.count, I32, name="prob2")
+    packed.dims = acc_s.dims
+    _inherit_mma_shape(packed, acc_s)
+    packed.packed_f16x2 = True
+    for state in range(row_states):
+        atom_m = state // 2
+        row_half = state % 2
+        local_max = None
+        for na in range(mn):
+            for jj in range(row_half * 2, row_half * 2 + 2):
+                slot = (atom_m * mn + na) * 4 + jj
+                value = acc_s.slots[slot]
+                local_max = value if local_max is None else fmax_f32(
+                    local_max, value)
+        current_max = _row_max_reduce(local_max)
+        old_max = _f32_value(row_max.slots.get(state, -1.0e30))
+        old_sum = _f32_value(row_sum.slots.get(state, 0.0))
+        max_delta = e.ssa(
+            "f32", f"arith.subf {old_max.name}, "
+            f"{current_max.name} : f32")
+        delta = e.ssa(
+            "f32", f"arith.mulf {max_delta.name}, "
+            f"{scale.name} : f32")
+        row_scale = _exp2_f32(delta)
+        offset = e.ssa(
+            "f32", f"arith.mulf {current_max.name}, "
+            f"{scale.name} : f32")
+        local_sum = None
+        neg_offset = _neg_f32(offset)
+        for na in range(mn):
+            # The two elements of an (atom, row-half) pair are exactly the
+            # halves of one A-operand register, so they are converted with a
+            # single cvt.rn.f16x2.f32 and stored already packed.  The f32
+            # exponents are not written back: nothing reads them again.
+            base = (atom_m * mn + na) * 4 + row_half * 2
+            e_lo = _exp2_f32(_fma_f32(acc_s.slots[base], scale, neg_offset))
+            e_hi = _exp2_f32(
+                _fma_f32(acc_s.slots[base + 1], scale, neg_offset))
+            acc_s.slots[base] = e_lo
+            acc_s.slots[base + 1] = e_hi
+            packed.slots[base] = _cvt_f16x2(e_lo, e_hi)
+            pair = e.ssa(
+                "f32", f"arith.addf {e_lo.name}, {e_hi.name} : f32")
+            local_sum = pair if local_sum is None else e.ssa(
+                "f32", f"arith.addf {local_sum.name}, {pair.name} : f32")
+        for output in outputs:
+            output_mn = output.count // (4 * (row_states // 2))
+            for na in range(output_mn):
+                for jj in range(row_half * 2, row_half * 2 + 2):
+                    slot = (atom_m * output_mn + na) * 4 + jj
+                    output.slots[slot] = e.ssa(
+                        "f32", f"arith.mulf {output.slots[slot].name}, "
+                        f"{row_scale.name} : f32")
+        current_sum = _row_sum_reduce(local_sum)
+        scaled_old = e.ssa(
+            "f32", f"arith.mulf {old_sum.name}, "
+            f"{row_scale.name} : f32")
+        row_max.slots[state] = current_max
+        row_sum.slots[state] = e.ssa(
+            "f32", f"arith.addf {scaled_old.name}, "
+            f"{current_sum.name} : f32")
+
+    return packed
+
+
+def _inherit_mma_shape(dst, src):
+    """Carry the (4, MMA_M, MMA_N) geometry through fragment conversions."""
+    if hasattr(src, "mma_shape"):
+        dst.mma_shape = src.mma_shape
+    return dst
+
+
+def online_softmax(acc_s, acc_o, row_max, row_sum, scale_log2,
+                    partial_max, partial_sum, global_max, global_sum,
+                    warps_n, warps_m=1):
+    """Update one warp's 32-row score slice with CTA-wide N reduction."""
+    from .kernel_objects import Fragment
+    from .meta import F16
+
+    outputs = tuple(acc_o) if isinstance(acc_o, (tuple, list)) else (acc_o,)
+    if row_max.count != row_sum.count:
+        raise ValueError(
+            "SM86 online_softmax expects matching row-state buffers")
+    if int(warps_n) == 1:
+        # Every N column of a row lives in one warp, so the reduction is
+        # intra-thread and the score fragment may be any multiple of the
+        # warp's (4-value, 2-row-half) atom grid: 32 at the 64x64 tile,
+        # 64 at the 128x64 tile.
+        if acc_s.count % (4 * max(1, row_max.count // 2)) != 0:
+            raise ValueError(
+                "single-warp SM86 softmax score fragment does not tile the "
+                "row-state grid")
+        if any(out.count not in (32, 64) for out in outputs):
+            raise ValueError(
+                "single-warp SM86 softmax has incompatible output fragments")
+        return _online_softmax_single_warp(
+            acc_s, outputs, row_max, row_sum, scale_log2)
+    if acc_s.count != 32:
+        raise ValueError(
+            "cross-warp SM86 softmax expects a 32-value score fragment")
+    if any(out.count != 32 for out in outputs):
+        raise ValueError("cross-warp SM86 softmax expects 32-value outputs")
+    e = _emitter()
+    scale = _f32_value(scale_log2)
+    row_states = row_max.count
+    mn = 4
+    tid = e.thread_id("x")
+    lane = e.idx_binop("arith.remsi", tid, e.idx_const(32))
+    wid = e.idx_binop("arith.divsi", tid, e.idx_const(32))
+    wm = e.idx_binop("arith.remsi", wid, e.idx_const(int(warps_m)))
+    wn = e.idx_binop("arith.divsi", wid, e.idx_const(int(warps_m)))
+    group = e.idx_binop("arith.divsi", lane, e.idx_const(4))
+    leader = e.ssa("i1", f"arith.cmpi eq, {e.idx_binop('arith.remsi', lane, e.idx_const(4)).name}, {e.idx_const(0).name} : index")
+    old_sums = []
+    row_scales = []
+
+    def global_row(state):
+        local = e.idx_binop(
+            "arith.addi", e.idx_const(
+                state // 2 * 16 + (state % 2) * 8), group)
+        return e.idx_binop(
+            "arith.addi", e.idx_binop(
+                "arith.muli", wm, e.idx_const(32)), local)
+    for state in range(4):
+        local = None
+        atom_m = state // 2
+        row_half = state % 2
+        for na in range(mn):
+            for jj in range(row_half * 2, row_half * 2 + 2):
+                slot = (atom_m * mn + na) * 4 + jj
+                value = acc_s.slots[slot]
+                local = value if local is None else fmax_f32(local, value)
+        local = _row_max_reduce(local)
+        row = global_row(state)
+        partial_idx = e.idx_binop(
+            "arith.addi", e.idx_binop(
+                "arith.muli", wn, e.idx_const(32 * int(warps_m))), row)
+        e.open_if(leader)
+        _smem_f32_store(partial_max, partial_idx, local)
+        e.close_if()
+
+    e.barrier()
+    zero_i = e.idx_const(0)
+    is_wn0 = e.ssa("i1", f"arith.cmpi eq, {wn.name}, {zero_i.name} : index")
+    reduce_leader = e.ssa("i1", f"arith.andi {is_wn0.name}, {leader.name} : i1")
+    for state in range(4):
+        row = global_row(state)
+        best = None
+        for w in range(int(warps_n)):
+            value = _smem_f32_load(
+                partial_max,
+                e.idx_binop("arith.addi", e.idx_const(
+                    w * 32 * int(warps_m)), row))
+            best = value if best is None else fmax_f32(best, value)
+        e.open_if(reduce_leader)
+        _smem_f32_store(global_max, row, best)
+        e.close_if()
+    e.barrier()
+
+    for state in range(4):
+        atom_m = state // 2
+        row_half = state % 2
+        row = global_row(state)
+        current_max = _smem_f32_load(global_max, row)
+        old_max = _f32_value(row_max.slots.get(state, -1.0e30))
+        old_sum = _f32_value(row_sum.slots.get(state, 0.0))
+        delta = e.ssa("f32", f"arith.mulf {e.ssa('f32', f'arith.subf {old_max.name}, {current_max.name} : f32').name}, {scale.name} : f32")
+        row_scale = _exp2_f32(delta)
+        offset = e.ssa(
+            "f32", f"arith.mulf {current_max.name}, "
+            f"{scale.name} : f32")
+        old_sums.append(old_sum)
+        row_scales.append(row_scale)
+        local_sum = None
+        neg_offset = _neg_f32(offset)
+        for na in range(mn):
+            for jj in range(row_half * 2, row_half * 2 + 2):
+                slot = (atom_m * mn + na) * 4 + jj
+                score = acc_s.slots[slot]
+                exponent = _exp2_f32(_fma_f32(score, scale, neg_offset))
+                acc_s.slots[slot] = exponent
+                local_sum = exponent if local_sum is None else e.ssa(
+                    "f32", f"arith.addf {local_sum.name}, {exponent.name} : f32")
+        for output in outputs:
+            output_mn = output.count // (4 * (row_states // 2))
+            for na in range(output_mn):
+                for jj in range(row_half * 2, row_half * 2 + 2):
+                    slot = (atom_m * output_mn + na) * 4 + jj
+                    output.slots[slot] = e.ssa(
+                        "f32", f"arith.mulf {output.slots[slot].name}, "
+                        f"{row_scale.name} : f32")
+        current_sum = _row_sum_reduce(local_sum)
+        partial_idx = e.idx_binop(
+            "arith.addi", e.idx_binop(
+                "arith.muli", wn, e.idx_const(32 * int(warps_m))), row)
+        e.open_if(leader)
+        _smem_f32_store(partial_sum, partial_idx, current_sum)
+        e.close_if()
+        row_max.slots[state] = current_max
+
+    e.barrier()
+    for state in range(4):
+        row = global_row(state)
+        total = None
+        for w in range(int(warps_n)):
+            value = _smem_f32_load(
+                partial_sum,
+                e.idx_binop("arith.addi", e.idx_const(
+                    w * 32 * int(warps_m)), row))
+            total = value if total is None else e.ssa(
+                "f32", f"arith.addf {total.name}, {value.name} : f32")
+        e.open_if(reduce_leader)
+        _smem_f32_store(global_sum, row, total)
+        e.close_if()
+
+    e.barrier()
+    for state in range(4):
+        row = global_row(state)
+        current_sum = _smem_f32_load(global_sum, row)
+        scaled_old = e.ssa(
+            "f32", f"arith.mulf {old_sums[state].name}, "
+            f"{row_scales[state].name} : f32")
+        row_sum.slots[state] = e.ssa(
+            "f32", f"arith.addf {scaled_old.name}, "
+            f"{current_sum.name} : f32")
+
+    e.barrier()
+
+    p = Fragment(acc_s.count, F16, name="prob")
+    p.dims = acc_s.dims
+    _inherit_mma_shape(p, acc_s)
+    for i, value in acc_s.slots.items():
+        p.slots[i] = e.ssa("f16", f"arith.truncf {value.name} : f32 to f16")
+    return p
+
+
+def finalize_attention_output(acc_o, row_sum):
+    """Normalize an FP32 output fragment by its row denominators."""
+    if acc_o.count not in (32, 64) or row_sum.count not in (2, 4):
+        raise ValueError(
+            "SM86 attention output expects 32/64 values and 2/4 row states")
+    e = _emitter()
+    inv = []
+    for value in row_sum.slots.values():
+        value = _f32_value(value)
+        inv.append(e.ssa(
+            "f32",
+            'nvvm.inline_ptx "rcp.approx.ftz.f32 $0, $1;" '
+            f"ro ({value.name} : f32) -> f32"))
+    output_mn = acc_o.count // (4 * max(1, row_sum.count // 2))
+    for slot, value in list(acc_o.slots.items()):
+        state = (slot // 4) // output_mn * 2 + ((slot % 4) // 2)
+        acc_o.slots[slot] = e.ssa(
+            "f32", f"arith.mulf {value.name}, {inv[state].name} : f32")
 
 
 def min_i32(a, b):
@@ -1559,7 +2127,7 @@ def min_i32(a, b):
 
 def smem_stage(smem_arr, stage, elems_per_stage):
     """Window a staged smem array at (stage * elems_per_stage). stage may
-    be an SSA index — returns a SmemArray view with SSA offset base."""
+    be an SSA index - returns a SmemArray view with SSA offset base."""
     e = _emitter()
     from .emitter import SSA as _SSA
     if isinstance(stage, int):
@@ -1593,7 +2161,7 @@ def _mma_group_key(c_reg, e):
 
 
 def bool_to_i32(b):
-    """i1 SSA -> i32 SSA (0/1) — zero-extend: sign-extending true gives -1."""
+    """i1 SSA -> i32 SSA (0/1) - zero-extend: sign-extending true gives -1."""
     e = _emitter()
     if isinstance(b, bool):
         return e.ssa("i32", f"arith.constant {1 if b else 0} : i32")
@@ -1684,7 +2252,7 @@ def div_i32(a, b):
 
 
 def fence_proxy():
-    """cute.arch.fence_proxy — async-proxy fence (shared::cta)."""
+    """cute.arch.fence_proxy - async-proxy fence (shared::cta)."""
     _emitter().fence_proxy_async_shared()
 
 
@@ -1705,9 +2273,22 @@ def make_barrier_array(name: str, count: int):
 
 
 def make_rmem_tensor(shape, dtype):
-    """cute.make_rmem_tensor(shape, dtype) — register fragment tensor."""
+    """cute.make_rmem_tensor(shape, dtype) - register fragment tensor.
+
+    `shape` may also be a `partition_shape_C` result, in which case the
+    fragment carries the accumulator's `(4, MMA_M, MMA_N)` value geometry.
+    """
     from .kernel_objects import Fragment
     from .meta import BOOL, F32, F16
+    from .cute_objects import AccumulatorShape as _AccShape
+
+    if isinstance(shape, _AccShape):
+        elem = {"Boolean": BOOL, "Float32": F32, "Float16": F16}.get(
+            getattr(dtype, "name", ""), F32)
+        fragment = Fragment(shape.count, elem)
+        fragment.mma_shape = shape.shape
+        fragment.dims = shape.shape
+        return fragment
 
     def _flat_sh(x):
         out = []

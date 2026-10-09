@@ -1,4 +1,4 @@
-"""S4: dense_gemm-shaped kernel assembled from the FULL object model —
+"""S4: dense_gemm-shaped kernel assembled from the FULL object model -
 
 index derivation through algebra.py (cute.* op emission + C++ passes),
 pipeline through the PipelineTmaAsync driver, fragments through the

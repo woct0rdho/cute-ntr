@@ -1,4 +1,4 @@
-"""tiled.py — TV layouts, tiled copies, fragments: CuTe canonical partitioning
+"""tiled.py - TV layouts, tiled copies, fragments: CuTe canonical partitioning
 as host-side meta-objects (M3 first slice).
 
 Everything here is constexpr meta computed at trace time (mirroring the
@@ -23,7 +23,7 @@ def make_layout_tv(thr_layout: CuteLayout, val_layout: CuteLayout):
     if len(t_shape) != 2 or len(v_shape) != 2:
         raise NotImplementedError("make_layout_tv supports rank-2 thr/val for now")
     tiler = (t_shape[0] * v_shape[0], t_shape[1] * v_shape[1])
-    # canonical tv layout: ((thr),(val)) — mode 0 = threads, mode 1 = values
+    # canonical tv layout: ((thr),(val)) - mode 0 = threads, mode 1 = values
     tv = CuteLayout(((t_shape[0], t_shape[1]), (v_shape[0], v_shape[1])),
                     ((v_shape[0] * v_shape[1] * t_shape[1], v_shape[0] * v_shape[1]),
                      (v_shape[1], 1)))

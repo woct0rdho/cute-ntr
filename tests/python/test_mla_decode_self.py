@@ -6,7 +6,7 @@ partitioned across CTAs, partial (O, m, l) combined by a second kernel);
 QK^T via m16n8k16 f16 mma, online softmax (f32 exp via ex2.approx), PV via
 m16n8k16 with the O accumulator held in registers. Golden vs torch; perf vs
 the same torch reference (there is NO official CuTeDSL MLA baseline on
-sm_120a — hardware boundary, see README).
+sm_120a - hardware boundary, see README).
 """
 import sys
 import time
@@ -80,7 +80,7 @@ def mla_decode_kernel(mQ: cute.Tensor, mK: cute.Tensor, mP: cute.Tensor,
     hi32 = cute.min_i32(lo32 + tps, cute.div_i32(S, TILE_S))
     for t in range(cute.i32_to_index(lo32), cute.i32_to_index(hi32)):
         # ---- load K tile into both mirrors (natural + dim-major).
-        # Division-free addressing: D = 576 = 4*128 + 64 — four full
+        # Division-free addressing: D = 576 = 4*128 + 64 - four full
         # NTHREADS-wide passes (d = rep*128 + tidx, tok folded at trace
         # time) plus a power-of-2 tail (64 cols -> div/mod become shifts).
         tile_base = k_base + t * (TILE_S * D)
@@ -148,7 +148,7 @@ def mla_decode_kernel(mQ: cute.Tensor, mK: cute.Tensor, mP: cute.Tensor,
             sM[tidx * 3 + 1] = lsum
         cute.sync_threads()
 
-        # ---- PV in registers: O = O*f_old + P·V; every warp owns its own
+        # ---- PV in registers: O = O*f_old + P*V; every warp owns its own
         # 16 vcols (uniform code, no divergence); pS fragment loaded once
         fa = cute.ldmatrix(pS, lane16 * TILE_S + half8, num=4, trans=False)
         a_frags = [cute.extract_frag(fa, j) for j in range(4)]

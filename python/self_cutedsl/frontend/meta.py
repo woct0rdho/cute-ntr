@@ -1,4 +1,4 @@
-"""meta.py — host-side CuTe meta objects (tensors, tiles, coords, layouts).
+"""meta.py - host-side CuTe meta objects (tensors, tiles, coords, layouts).
 
 All constexpr meta computed at trace time, mirroring official partial
 evaluation. `.type` strings approximate the official pretty types for the
@@ -20,7 +20,11 @@ class ElementType:
 
     def __eq__(self, other):
         # cutlass._DType instances compare by name (duck identity)
-        return getattr(other, "name", None) == self.name
+        other_name = getattr(other, "name", None)
+        aliases = {"f16": "Float16", "f32": "Float32",
+                   "bf16": "BFloat16"}
+        return aliases.get(other_name, other_name) == aliases.get(
+            self.name, self.name)
 
     def __hash__(self):
         return hash(self.name)
@@ -87,8 +91,8 @@ class TensorMeta:
             if isinstance(mode[1], int):
                 idx += int(ci) * mode[1]
             else:
-                # merged group: colexicographic — FIRST sub-mode fastest
-                # (m = i32 + 4*i4 + …; kg = j + 4*rk)
+                # merged group: colexicographic - FIRST sub-mode fastest
+                # (m = i32 + 4*i4 + ...; kg = j + 4*rk)
                 rem = int(ci)
                 for sz, st in mode[1]:
                     idx += (rem % sz) * st
@@ -102,7 +106,7 @@ class TensorMeta:
         is shared across all values of those extents) and are published as
         runtime scalars named '<param>_d<i>' in the dynamic-scalar channel
         at every call. The kernel contract: marked extents must be consumed
-        through runtime scalars (bounds, grids, predicates) — never baked
+        through runtime scalars (bounds, grids, predicates) - never baked
         into addressing arithmetic. This mirrors Triton's constexpr-vs-
         runtime split as an explicit policy, not a global switch.
         """
@@ -134,7 +138,7 @@ class TensorMeta:
         return self._torch.reshape(-1)[self._flat_index(coord)]
 
     def __setitem__(self, coord, v):
-        # non-contiguous permuted views: reshape(-1) would COPY — write
+        # non-contiguous permuted views: reshape(-1) would COPY - write
         # through the view's own multi-index instead
         idx = self._flat_index(coord)
         t = self._torch
@@ -221,7 +225,7 @@ class TiledTensorMeta:
     def __getitem__(self, idx):
         if isinstance(idx, tuple) and len(idx) == 2 and \
                 isinstance(idx[1], (tuple, list)):
-            # (tile_group_k, (None,..,None)) — dense_gemm grid idiom
+            # (tile_group_k, (None,..,None)) - dense_gemm grid idiom
             return _RestModes(self.rest)
         raise TypeError(
             f"TiledTensorMeta subscript {idx!r} unsupported outside kernels")
@@ -260,7 +264,7 @@ def zipped_divide(m, tiler):
 
 
 class _RestModes:
-    """gc[(k, (None, ..., None))] — tile group selected, rest modes kept.
+    """gc[(k, (None, ..., None))] - tile group selected, rest modes kept.
 
     The dense_gemm host grid idiom reads `.shape` off this to obtain the
     CTA counts per mode.
@@ -292,7 +296,7 @@ def make_ordered_layout(shape, order) -> CuteLayout:
 
 
 def cute_size(x, mode=None) -> int:
-    """cute.size(tensor_or_layout, mode=[k]) — static at trace time."""
+    """cute.size(tensor_or_layout, mode=[k]) - static at trace time."""
     if isinstance(x, TiledTensorMeta):
         if mode is not None:
             k = mode[0] if isinstance(mode, (list, tuple)) else mode

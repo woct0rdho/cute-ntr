@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""bench_torch_baselines.py — community-default context column (op level).
+"""bench_torch_baselines.py - community-default context column (op level).
 
 Not a CuTeDSL comparison: this measures what mainstream PyTorch pays for the
 FUNCTION-ALIGNED part of each family on the same GPU, so the report can show
 the self stack and the official CuTeDSL wheel against the ecosystem default:
 
   * norm family: torch eager and torch.compile implementations of the
-    RMSNorm core (fp32 reduction, fp16 in/out — WITHOUT the NVFP4
+    RMSNorm core (fp32 reduction, fp16 in/out - WITHOUT the NVFP4
     quantization step; the fused operators do strictly more work);
   * GEMM family: torch.matmul (cuBLAS) at the dense_gemm shapes, fp16;
   * MoE family: no aligned community kernel is installed in this
     environment (production W4A16 MoE serving uses triton/flashinfer CUDA
-    kernels outside this comparison) — recorded as N/A, not measured.
+    kernels outside this comparison) - recorded as N/A, not measured.
 
 Usage:
   .venv-self/bin/python tools/perf/bench_torch_baselines.py

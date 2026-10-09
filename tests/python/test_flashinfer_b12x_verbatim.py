@@ -26,7 +26,7 @@ _E2M1_VALUES = (
 
 
 def _fast_scale_decode(sf8: torch.Tensor) -> torch.Tensor:
-    """Mirror the vendored ``fp8_e4m3_to_f32_and_rcp`` scale decoder.
+    """Mirror the vendored `fp8_e4m3_to_f32_and_rcp` scale decoder.
 
     Its nonzero exponent-zero codes use the same implicit-one expression as
     normal codes when selecting E2M1 values.  MMA dequantization still uses

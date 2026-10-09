@@ -21,6 +21,16 @@ class _DType:
         return self.bits
 
     @property
+    def zero(self):
+        return 0.0 if self.is_float else 0
+
+    @property
+    def inf(self):
+        if not self.is_float:
+            raise AttributeError(f"{self.name} has no infinity constant")
+        return float("inf")
+
+    @property
     def mlir_type(self):
         from cutlass._mlir.ir import Type
 

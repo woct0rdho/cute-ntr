@@ -1,4 +1,4 @@
-"""cutlass.utils.blockscaled_layout — SM120 block-scaled SF layout helpers.
+"""cutlass.utils.blockscaled_layout - SM120 block-scaled SF layout helpers.
 
 The scale-factor tensors live in the canonical CUTLASS blocked layout
 M(32x4xrest_m) x K(4xrest_k) x L (the TMA-friendly atom_m=(32,4), atom_k=4
@@ -16,11 +16,11 @@ def _tile_shape_sf(tile_shape_mnk, sf_vec_size):
 
 def tile_atom_to_shape_SF(tensor_or_shape, sf_vec_size,
                           tile_shape_mnk=(128, 128, 128)):
-    """Derive canonical SF storage from a logical A/B ``(mn, k, l)``.
+    """Derive canonical SF storage from a logical A/B `(mn, k, l)`.
 
-    Logical K first contracts by ``sf_vec_size``; four scale values form
+    Logical K first contracts by `sf_vec_size`; four scale values form
     each 32-bit block.  Flattened modes match the example's physical tensor:
-    ``(32,4,rm,4,rk,l)``.
+    `(32,4,rm,4,rk,l)`.
     """
     from self_cutedsl.frontend.cute_objects import Layout as L
 

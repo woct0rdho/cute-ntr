@@ -1,4 +1,4 @@
-"""cuda_driver.py — CUDA Driver JIT runtime for selectable NVIDIA PTX targets.
+"""cuda_driver.py - CUDA Driver JIT runtime for selectable NVIDIA PTX targets.
 
 Loads PTX produced by the open compiler stack (cutlass-compiler passes +
 LLVM NVPTX) via cuModuleLoadDataEx and launches kernels via cuLaunchKernel.
@@ -116,6 +116,17 @@ class DriverJit:
         if func is None:
             err, func = cu.cuModuleGetFunction(self._mod, manifest.entry.encode())
             _check(err, "cuModuleGetFunction")
+            # Above 48 KiB the kernel allocates from the dynamic shared-memory
+            # arena, which the driver only allows after an explicit opt-in.
+            if manifest.dynamic_smem_bytes > 48 * 1024:
+                res = cu.cuFuncSetAttribute(
+                    func,
+                    cu.CUfunction_attribute
+                    .CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    int(manifest.dynamic_smem_bytes))
+                # cuda-bindings returns either a bare result or a 1-tuple.
+                err = res[0] if isinstance(res, tuple) else res
+                _check(err, "cuFuncSetAttribute")
             self._func_cache[manifest.entry] = func
         grid = grid or manifest.grid
         block = block or manifest.block

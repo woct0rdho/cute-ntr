@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""render_tables.py — merge dual-stack perf JSONs into tables + headline mean.
+"""render_tables.py - merge dual-stack perf JSONs into tables + headline mean.
 
 Reads artifacts/perf/<family>_{self,official}.json (written by the
 tools/perf/bench_* scripts), and emits:
 
-  * artifacts/perf/summary.md      — all families, per-shape tables,
+  * artifacts/perf/summary.md      - all families, per-shape tables,
                                      headline arithmetic mean
-  * artifacts/perf/summary.json    — machine-readable version
+  * artifacts/perf/summary.json    - machine-readable version
   * artifacts/perf/dense_gemm_verbatim.json / blockscaled_verbatim.json
     (legacy combined schema, refreshed from the new captures)
 
@@ -88,7 +88,7 @@ def main() -> int:
 
     summary = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                "families": {}, "headline": None}
-    md = ["# Performance summary — self stack vs official CuTeDSL "
+    md = ["# Performance summary - self stack vs official CuTeDSL "
           "(RTX 5090 Laptop, sm_120a)",
           "",
           f"Generated: {summary['generated_at']}",
@@ -102,7 +102,7 @@ def main() -> int:
         md.append("")
         fam = {"title": title, "cases": [], "family_pct": None}
         if not off or not slf:
-            md.append(f"*incomplete — missing {'official' if not off else 'self'} capture*\n")
+            md.append(f"*incomplete - missing {'official' if not off else 'self'} capture*\n")
             summary["families"][key] = fam
             continue
 
@@ -127,10 +127,10 @@ def main() -> int:
         for k, o, c, pct in rows:
             md.append(f"| {k} | {o['median_us']} | {c['median_us']} | "
                       f"{metric(o, key)} | {metric(c, key)} | "
-                      f"**{pct}%** |")
+                      f"{pct}% |")
         if fam_pct is not None:
             md.append("")
-            md.append(f"Family mean: **{fam_pct}%** of official.")
+            md.append(f"Family mean: {fam_pct}% of official.")
         md.append("")
         fam["cases"] = [
             {"shape": k, "official_us": o["median_us"],
@@ -171,16 +171,16 @@ def main() -> int:
         md.append("## Headline")
         md.append("")
         for k, t, p in family_pcts:
-            md.append(f"- {t}: **{p}%**")
+            md.append(f"- {t}: {p}%")
         md.append("")
-        md.append(f"**Arithmetic mean across families: {headline}% of "
-                  f"official CuTeDSL throughput.**")
+        md.append(f"Arithmetic mean across families: {headline}% of "
+                  f"official CuTeDSL throughput.")
         md.append("")
 
     mla_path = Path(args.mla_json)
     if mla_path.exists():
         mla = json.loads(mla_path.read_text())
-        md.append("## FlashMLA decode (self-built sm120 core — separate "
+        md.append("## FlashMLA decode (self-built sm120 core - separate "
                   "baseline)")
         md.append("")
         md.append("No official CuTeDSL MLA exists on sm_120a (SM100 "
@@ -195,7 +195,7 @@ def main() -> int:
                 shape = r.get("shape") or [r.get("B"), r.get("S"), r.get("H")]
                 md.append(f"| {shape} | {r.get('self_us')} | "
                           f"{r.get('torch_ref_us', r.get('torch_us'))} | "
-                          f"**{r.get('speedup_vs_torch', r.get('speedup'))}x** |")
+                          f"{r.get('speedup_vs_torch', r.get('speedup'))}x |")
             md.append("")
         summary["mla"] = mla
 

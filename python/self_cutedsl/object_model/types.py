@@ -1,4 +1,4 @@
-"""types.py — CuTe object-model types with textual !cute<...> serialization.
+"""types.py - CuTe object-model types with textual !cute<...> serialization.
 
 Copyright (c) 2026 CuTeDSL-Fully-OpenSourced contributors
 Serialization semantics follow the BSD-3 cutlass_compiler cute dialect
@@ -25,7 +25,7 @@ def _render(t) -> str:
 
 
 class DynLeaf:
-    """A runtime dynamic leaf — binds one SSA value into a type slot."""
+    """A runtime dynamic leaf - binds one SSA value into a type slot."""
 
     def __init__(self, ssa):
         self.ssa = ssa            # emitter SSA (i32) or None (structure-only)

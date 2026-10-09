@@ -1,4 +1,4 @@
-"""Argument-rebinding regressions for callables returned by ``cute.compile``."""
+"""Argument-rebinding regressions for callables returned by `cute.compile`."""
 import sys
 from pathlib import Path
 

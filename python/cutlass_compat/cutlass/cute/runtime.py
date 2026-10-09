@@ -1,4 +1,4 @@
-"""cutlass.cute.runtime — from_dlpack host entry (compat)."""
+"""cutlass.cute.runtime - from_dlpack host entry (compat)."""
 from __future__ import annotations
 
 

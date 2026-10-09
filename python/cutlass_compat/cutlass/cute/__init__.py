@@ -1,4 +1,4 @@
-"""cutlass.cute — compat surface backed by the self stack frontend.
+"""cutlass.cute - compat surface backed by the self stack frontend.
 
 The real logic lives in self_cutedsl.frontend; this module exposes the
 official-API names (cute.kernel, cute.jit, cute.arch, cute.printf, ...).
@@ -39,7 +39,7 @@ def __getattr__(name):
         return math
     if name == 'struct':
         # importing the submodule binds cutlass.cute.struct as a MODULE
-        # attribute that would shadow this namespace on later accesses —
+        # attribute that would shadow this namespace on later accesses -
         # install the namespace as the explicit package attribute
         from cutlass.cute.struct import _StructNamespace
         import cutlass.cute as _cc
@@ -108,7 +108,31 @@ class Tile:
 
 
 class Swizzle:
-    pass
+    """Compatibility representation of CuTe's `Swizzle<B,M,S>`."""
+
+    def __init__(self, b, m, s):
+        self.b = int(b)
+        self.m = int(m)
+        self.s = int(s)
+
+
+def make_swizzle(b, m, s):
+    return Swizzle(b, m, s)
+
+
+def make_composed_layout(swizzle, offset, layout, **kw):
+    """`cute.make_composed_layout(swizzle, offset, layout)`.
+
+    The official Ampere examples build their shared-memory atoms this way and
+    then tile them with `tile_to_shape`.  The swizzle is carried alongside
+    the outer layout so `tile_to_shape` can tile the outer layout and
+    `SmemArray.get_tensor` can apply the swizzle when the view is made -
+    which is the same split this repository's own kernels use via
+    `get_tensor(layout, swizzle=...)`.
+    """
+    from cutlass.utils import ComposedLayoutStaged
+
+    return ComposedLayoutStaged(layout, 1, swizzle)
 
 
 class TensorSSA:
@@ -152,7 +176,7 @@ def size(x, mode=None):
 
 # ------------------------------------------------------------ tensor utils
 def zipped_divide(m, tiler=None):
-    """cute.zipped_divide — historical dual-family contract.
+    """cute.zipped_divide - historical dual-family contract.
 
     Object-model inputs tile through the cute_objects layout algebra (the
     verbatim flagship kernels subscript the returned Layout directly);
@@ -170,7 +194,7 @@ def zipped_divide(m, tiler=None):
     )
 
     if isinstance(m, CoordinateTensorMeta):
-        # identity/coordinate tensors keep their meta tiled form — kernels
+        # identity/coordinate tensors keep their meta tiled form - kernels
         # index them for predicates (cute.elem_less on coordinate values)
         return m.tiled(_flatten_shape2(tiler))
     if isinstance(m, TensorMeta):
@@ -301,16 +325,21 @@ def make_tiled_copy_B(atom, tiled_mma):
 def make_tiled_copy_tv(atom, thr_layout, val_layout):
     """Create the official TV tiled-copy descriptor.
 
-    cp.async atoms use the richer compatibility descriptor from ``_fi_copy``;
-    its partitioned views can select the SM86 matrix staging backend when the
-    caller supplies the operand metadata.  Universal atoms retain the generic
-    frontend implementation.
+    cp.async atoms use the compatibility descriptor from `_fi_copy`, whose
+    partitioned views select the SM86 matrix staging backend when the caller
+    supplies the operand metadata.  Universal atoms use the same descriptor
+    family so that a partitioned copy can lower to either a per-element
+    fragment store or a vectorized shared-memory tile store (the epilogue
+    path), selected from the operand memory spaces.
     """
-    from cutlass.cute._fi_copy import _CpAsyncAtom, TVCopyAsync
+    from cutlass.cute._fi_copy import (
+        _CpAsyncAtom, TVCopyAsync, TVCopyUniversal, _UniversalAtom)
     from self_cutedsl.frontend import builtins
 
     if isinstance(atom, _CpAsyncAtom):
         return TVCopyAsync(atom, thr_layout, val_layout)
+    if isinstance(atom, _UniversalAtom):
+        return TVCopyUniversal(atom, thr_layout, val_layout)
     return builtins.make_tiled_copy_tv(atom, thr_layout, val_layout)
 
 
@@ -350,7 +379,9 @@ def copy(atom, src, dst, pred=None, **kw):
         _CpAsyncAtom,
         _UniversalAtom,
         TVCopyAsync,
+        TVCopyUniversal,
         copy_cpasync,
+        copy_tv_universal,
         copy_universal,
     )
     if isinstance(atom, _CpAsyncAtom):
@@ -380,6 +411,9 @@ def copy(atom, src, dst, pred=None, **kw):
         return
     if isinstance(atom, _UniversalAtom):
         copy_universal(atom, src, dst, pred)
+        return
+    if isinstance(atom, TVCopyUniversal):
+        copy_tv_universal(atom.atom, src, dst, pred)
         return
     if type(atom).__name__ == "_SF_copy":
         builtins.copy_sf(atom, src, dst)
@@ -431,7 +465,7 @@ def _strides_of(layout, like):
 
 def filter_zeros(x):
     """Drop zero-stride modes (tma partition views in this model are
-    already minimal descriptors — identity for them; layouts keep their
+    already minimal descriptors - identity for them; layouts keep their
     nonzero-stride modes)."""
     from self_cutedsl.frontend.cute_objects import Layout as _L, Tensor as _T
 
@@ -520,6 +554,12 @@ def tile_to_shape(atom_layout, shape, order=None, **kw):
     """Tile a layout atom up to shape (row-major rest by default)."""
     from self_cutedsl.frontend.cute_objects import Layout as _L, _flatten, _prod
 
+    carried_swizzle = None
+    if hasattr(atom_layout, "outer") and hasattr(atom_layout, "stages"):
+        # @cute.struct / make_composed_layout atoms: tile the outer layout and
+        # hand the swizzle on to the eventual get_tensor() call.
+        carried_swizzle = getattr(atom_layout, "inner", None)
+        atom_layout = atom_layout.outer
     a_shp = _flatten(atom_layout.shape)
     a_str = _flatten(atom_layout.stride)
     tgt = _flatten(shape)
@@ -529,7 +569,7 @@ def tile_to_shape(atom_layout, shape, order=None, **kw):
         stages = int(tgt[-1])
         tgt = tgt[:-1]
     reps = [-(-t // a) for t, a in zip(tgt, a_shp)] +         [1] * (len(a_shp) - len(tgt))
-    # atom tiled up to the per-stage tile: (tile, rest-not-used) — the
+    # atom tiled up to the per-stage tile: (tile, rest-not-used) - the
     # per-stage layout is just the atom repeated over the tile extents
     tile_s = tuple(tgt)
     tile_d = []
@@ -545,7 +585,8 @@ def tile_to_shape(atom_layout, shape, order=None, **kw):
         acc *= int(d)
     strides.reverse()
     from cutlass.utils import ComposedLayoutStaged
-    return ComposedLayoutStaged(_L(tile_s, tuple(strides)), stages)
+    return ComposedLayoutStaged(_L(tile_s, tuple(strides)), stages,
+                                carried_swizzle)
 
 
 def _prod_rest(rest):
@@ -650,10 +691,58 @@ def _tma_copy(atom, src, dst, tma_bar_ptr=None, mcast_mask=None):
     builtins.tma_copy_partitioned(atom, src, dst, tma_bar_ptr, mcast_mask)
 
 
-def make_fragment_like(part):
+def reshape_acc_to_frgA(acc):
+    """`layout_utils.reshape_acc_to_frgA`: score fragment -> PV A operand.
+
+    Equivalent to the official helper of the same name; the accumulator
+    already holds the A-operand values in per-thread register order, so this
+    is a re-pairing of FP16 values into `f16x2` registers, not a copy.
+    """
     from self_cutedsl.frontend import builtins
 
-    return builtins.make_fragment_like(part)
+    return builtins.reshape_acc_to_frgA(acc)
+
+
+def make_acc_tensor_mn_view(acc, transpose: bool = False):
+    """Official helper: view the accumulator with (M, N) modes.
+
+    The value order is unchanged; only the mode decomposition is exposed, so
+    callers can index it as rows/columns the way the layout-utils API does.
+    """
+    from self_cutedsl.frontend.kernel_objects import Fragment
+
+    frag = getattr(acc, "frag", acc)
+    if not isinstance(frag, Fragment):
+        raise TypeError("make_acc_tensor_mn_view expects a register fragment")
+    _, mm, mn = getattr(frag, "mma_shape", (4, frag.count // 16, 4))
+    dims = (16 * mm, 8 * mn)
+    if transpose:
+        dims = (dims[1], dims[0])
+    frag.mn_dims = dims
+    return frag
+
+
+def make_fragment_like(part, dtype=None):
+    """`cute.make_fragment_like(x[, dtype])`.
+
+    With a `dtype` the fragment is re-typed while keeping the value layout
+    (the epilogue uses this to hold the FP16 copy of an FP32 accumulator
+    before staging it through shared memory).
+    """
+    from self_cutedsl.frontend import builtins
+
+    if dtype is None:
+        return builtins.make_fragment_like(part)
+    from self_cutedsl.frontend.kernel_objects import Fragment
+
+    if isinstance(part, Fragment):
+        out = Fragment(part.count, dtype, name=f"{part.name}_{dtype.name}")
+        out.dims = part.dims
+        return out
+    src = builtins.make_fragment_like(part)
+    out = Fragment(src.count, dtype, name=f"{src.name}_{dtype.name}")
+    out.dims = getattr(src, "dims", (src.count,))
+    return out
 
 
 def const_f32(v):
@@ -774,6 +863,23 @@ def zero_f32():
     return _emitter().ssa("f32", "arith.constant 0.0 : f32", "float32")
 
 
+def online_softmax(acc_s, acc_o, row_max, row_sum, scale_log2,
+                   partial_max, partial_sum, global_max, global_sum,
+                   warps_n, warps_m=1):
+    """Focused SM86 online-softmax fragment primitive."""
+    from self_cutedsl.frontend import builtins
+
+    return builtins.online_softmax(
+        acc_s, acc_o, row_max, row_sum, scale_log2,
+        partial_max, partial_sum, global_max, global_sum, warps_n, warps_m)
+
+
+def finalize_attention_output(acc_o, row_sum):
+    from self_cutedsl.frontend import builtins
+
+    builtins.finalize_attention_output(acc_o, row_sum)
+
+
 def sync_threads():
     from self_cutedsl.frontend.builtins import _emitter
 
@@ -787,10 +893,11 @@ def make_mbarrier(name, count):
     return builtins.make_mbarrier(name, count)
 
 
-def make_smem_tile(name, count, element=None, align=128):
+def make_smem_tile(name, count, element=None, align=128, dynamic=False):
     from self_cutedsl.frontend import builtins
 
-    return builtins.make_smem_tile(name, count, element, align=align)
+    return builtins.make_smem_tile(name, count, element, align=align,
+                                   dynamic=dynamic)
 
 
 def tma_load(tma, smem, bar, coords):
@@ -1052,14 +1159,18 @@ def make_rmem_tensor(shape, dtype):
     return builtins.make_rmem_tensor(shape, dtype)
 
 
-def local_tile(m, tiler, coord):
+def local_tile(m, tiler, coord, proj=None):
     """Return a first-class layout-derived local tile.
 
-    Kernel tensor parameters are rebound to a host-side ``cute.Tensor`` view
+    Kernel tensor parameters are rebound to a host-side `cute.Tensor` view
     during device tracing.  Preserve the original strides and record selected
     rest coordinates as symbolic element offsets; this is the object-model
-    equivalent of the official ``local_tile`` operation and is consumed by
+    equivalent of the official `local_tile` operation and is consumed by
     partitioned copy/MMA backends.
+
+    `proj` (official API) selects which modes of the *result* are kept from
+    the tiled tensor and which come from the rest coordinates; a `None`
+    entry drops that mode, an integer selects the given rest coordinate.
     """
     from self_cutedsl.frontend import cute_objects as co
     from self_cutedsl.frontend.cute_objects import Tensor as HT, Layout
@@ -1085,12 +1196,23 @@ def local_tile(m, tiler, coord):
     if len(tile) > len(flat_s):
         raise ValueError("local_tile tiler rank exceeds tensor rank")
     origin = list(getattr(base, "origin", ()))
-    for axis, value in enumerate(coord[:len(tile)]):
+    # Coordinates after the tiled modes select ordinary rest modes. Their
+    # displacement uses the source stride directly; the tile extent only
+    # multiplies coordinates in the modes actually being tiled.
+    for axis, value in enumerate(coord[:len(flat_s)]):
         if value is not None:
-            origin.append((value, tile[axis] * flat_d[axis]))
+            factor = tile[axis] if axis < len(tile) else 1
+            origin.append((value, factor * flat_d[axis]))
     tile_strides = flat_d[:len(tile)]
-    return HT(base.base, Layout(tile, tile_strides), base.element,
-              origin=origin)
+    result = HT(base.base, Layout(tile, tile_strides), base.element,
+                origin=origin)
+    if proj is None:
+        return result
+    # `proj` keeps one mode per entry: None/drop for the unselected rest
+    # modes, an index for the selected ones. Nothing else in this profile
+    # consumes the projection, but the returned shape must match what the
+    # official example expects of the tile.
+    return result
 
 
 def _row_major_stride(shape):

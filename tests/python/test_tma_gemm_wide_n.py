@@ -1,4 +1,4 @@
-"""M6.4: wide-N pipelined TMA GEMM — 8 warps, N-direction atom tiling.
+"""M6.4: wide-N pipelined TMA GEMM - 8 warps, N-direction atom tiling.
 
 Tile 64x64: 4 warps in M (m16 each) x 2 warps in N (n8 x 8 atom
 repetitions per warp = n64). B tile is (K x 64); each N-warp reads its

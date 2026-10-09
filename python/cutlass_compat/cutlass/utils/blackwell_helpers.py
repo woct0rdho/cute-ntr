@@ -1,4 +1,4 @@
-"""cutlass.utils.blackwell_helpers — SM120 block-scaled host helpers.
+"""cutlass.utils.blackwell_helpers - SM120 block-scaled host helpers.
 
 get_permutation_mnk: warp-tile extent for the blockscaled tiled_mma
 (the atom grid is (4,2,1) warps with m16n8k64 fp4 / m16n8k32 fp8 atoms).

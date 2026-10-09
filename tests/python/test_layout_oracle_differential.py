@@ -83,7 +83,7 @@ def _materialize(name: str, layout_text: str, lines: list) -> str:
 
     cute.static cannot hold '?'-typed values (the verifier rejects the op
     outright, which the stderr-regex bootstrap path used to silently read
-    as 'placeholder accepted') — dynamic layouts must be built with
+    as 'placeholder accepted') - dynamic layouts must be built with
     cute.make_shape / make_stride over i32 leaves, exactly like the real
     emitter does.
     """

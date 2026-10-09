@@ -48,8 +48,8 @@ class _T:
 
 T = _T()
 
-# Official modules import scalar constructors from both ``cutlass`` and
-# ``cutlass.cutlass_dsl``. The dtype objects are callable constructors and
+# Official modules import scalar constructors from both `cutlass` and
+# `cutlass.cutlass_dsl`. The dtype objects are callable constructors and
 # carry the MLIR type metadata consumed by the self frontend.
 Int32 = _dt.Int32
 Int64 = _dt.Int64

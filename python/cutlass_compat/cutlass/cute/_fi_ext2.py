@@ -46,7 +46,7 @@ def autovec_copy(src, dst, **kw):
 
 
 def make_rmem_tensor(layout, dtype, *a, **kw):
-    """cute.make_rmem_tensor(layout, Boolean) etc. — a register fragment."""
+    """cute.make_rmem_tensor(layout, Boolean) etc. - a register fragment."""
     from self_cutedsl.frontend.kernel_objects import Fragment
     from self_cutedsl.frontend.cute_objects import Layout
 

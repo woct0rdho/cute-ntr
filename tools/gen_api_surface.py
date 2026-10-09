@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gen_api_surface.py — inventory the CuTeDSL API surface used by the frozen corpus.
+"""gen_api_surface.py - inventory the CuTeDSL API surface used by the frozen corpus.
 
 Statically walks the conformance corpus Python files (CUTLASS blackwell_geforce
 demos + FlashInfer SM120 operators) and extracts every attribute access rooted

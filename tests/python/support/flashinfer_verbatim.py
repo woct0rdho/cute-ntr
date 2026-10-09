@@ -89,7 +89,7 @@ def ensure_loaded() -> types.ModuleType:
     _load("flashinfer.trace.solution", VENDOR / "trace/solution.py", pkg=False)
     _load("flashinfer.trace.templates.norm", VENDOR / "trace/templates/norm.py", pkg=False)
 
-    # cute_dsl package: real __init__ pulls blockscaled/gemm etc. — instead a
+    # cute_dsl package: real __init__ pulls blockscaled/gemm etc. - instead a
     # shell that lazily exposes the operator modules themselves (unmodified)
     cd = types.ModuleType("flashinfer.cute_dsl")
     cd.__path__ = [str(VENDOR / "cute_dsl")]

@@ -1,54 +1,26 @@
-"""cutlass.cute.testing — JitArguments + benchmark (compat).
+"""cutlass.cute.testing - deprecated alias kept by the official package.
 
-benchmark() mirrors the official harness: rotate through `workspace_count`
-fresh workspaces to defeat L2 caching, warm up, then time `iterations`
-invocations with CUDA events; returns microseconds per invocation.
+The official CuTeDSL moved these helpers to `cutlass.testing` but keeps the
+`cutlass.cute.testing` spelling working (with a deprecation warning) because
+the Ampere examples still import it.  Mirror that here so unmodified example
+drivers run against either stack.
 """
 from __future__ import annotations
 
-import torch
+from cutlass.testing import (  # noqa: F401
+    CantImplementError,
+    CuptiProfiler,
+    JitArguments,
+    TensorInitConfig,
+    benchmark,
+    get_workspace_count,
+)
 
-
-class JitArguments:
-    def __init__(self, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
-
-    def __call__(self):
-        return self.args
-
-
-def benchmark(func, workspace_generator=None, workspace_count=1,
-              stream=None, warmup_iterations=2, iterations=100,
-              **kw) -> float:
-    workspaces = [workspace_generator() for _ in range(workspace_count)] \
-        if workspace_generator else [None]
-
-    # warmup
-    for i in range(warmup_iterations):
-        ws = workspaces[i % len(workspaces)]
-        func(*(ws.args if ws else ()))
-
-    torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for i in range(iterations):
-        ws = workspaces[i % len(workspaces)]
-        func(*(ws.args if ws else ()))
-    end.record()
-    torch.cuda.synchronize()
-    return start.elapsed_time(end) * 1000.0 / iterations  # µs per call
-
-
-def convert(src, dst=None, *a, **kw):
-    """cute.testing.convert(src_tensor, dst_tensor): elementwise copy from
-    src INTO dst (official argument order)."""
-    if dst is None:
-        return src
-    d = getattr(dst, "_torch", dst)
-    s_ = getattr(src, "_torch", src)
-    if hasattr(d, "element_type"):
-        d = d._torch
-    d.copy_(s_)
-    return dst
+__all__ = [
+    "JitArguments",
+    "benchmark",
+    "get_workspace_count",
+    "CantImplementError",
+    "CuptiProfiler",
+    "TensorInitConfig",
+]

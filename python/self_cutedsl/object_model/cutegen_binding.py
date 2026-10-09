@@ -1,7 +1,7 @@
-"""cutegen_binding.py — in-process oracle over the BSD cutegen algebra.
+"""cutegen_binding.py - in-process oracle over the BSD cutegen algebra.
 
 The vendored cutlass_compiler's cute dialect uses cutegen (header-only,
-BSD-3) as its layout/shape type engine — the same library the closed-source
+BSD-3) as its layout/shape type engine - the same library the closed-source
 official DSL links. The nanobind binding (tools/cutegen_oracle/, built into
 build-oracle/_cutegen_oracle.so by tools/cutegen_oracle/build.sh) exposes
 that algebra in-process, replacing the bootstrap "ask the verifier binary
@@ -9,7 +9,7 @@ via stderr diagnostics" path with a direct call.
 
 Semantics and limits (documented in the report):
   * text-in / text-out in the cute layout grammar ('?' = dynamic);
-  * the default dynamic_traits_t is stateless: '?' leaves are ANONYMOUS —
+  * the default dynamic_traits_t is stateless: '?' leaves are ANONYMOUS -
     an identity-carrying dynamic requires an emission backend mirroring
     mlir_dynamic.hpp (~600 lines of specializations), which the closed
     .so implements and we do not (our dynamic identity lives in the

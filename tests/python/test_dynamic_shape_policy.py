@@ -2,14 +2,14 @@
 
 mark_layout_dynamic() used to be a no-op, forcing one re-trace + recompile
 per shape. With the policy layer, marked extents are bucketed out of the
-jit cache key and published as runtime scalars — one compiled plan is
+jit cache key and published as runtime scalars - one compiled plan is
 shared across their values, with correctness carried by the runtime
 bound (the same channel the MLA decode kernel uses for its sequence
 length).
 
 Contract (documented on TensorMeta.mark_layout_dynamic): marked extents
 must not be baked into addressing arithmetic. The grid-stride kernel here
-satisfies it — the extent only feeds the dynamic loop bound.
+satisfies it - the extent only feeds the dynamic loop bound.
 """
 import sys
 from pathlib import Path

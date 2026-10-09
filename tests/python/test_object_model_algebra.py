@@ -1,17 +1,17 @@
-"""S1 acceptance: object-model algebra — triple-oracle differential tests.
+"""S1 acceptance: object-model algebra - triple-oracle differential tests.
 
-Oracle A: cutlass-compiler (C++ cute dialect passes) fold/expand — the
+Oracle A: cutlass-compiler (C++ cute dialect passes) fold/expand - the
            textual IR after --cute-fold-static/--cute-expand-ops contains
            the C++-computed structure; for fully-static chains it must
            fold to `cute.static` with the exact expected literal.
 Oracle B: python reference evaluator (independent arithmetic on
-           flattened shape/stride — used only to double-check static
+           flattened shape/stride - used only to double-check static
            literals, NOT a second algebra for dynamic cases).
 Oracle C: numeric ground truth via MLIR execution on the 5090 where the
            chain feeds a kernel store (subset).
 
-The core assertion of the object model: **the python layer never
-re-implements dynamic algebra** — dynamic chains only verify that the C++
+The core assertion of the object model: the python layer never
+re-implements dynamic algebra - dynamic chains only verify that the C++
 passes accept + fully lower them (zero cute ops after --cute-to-base).
 """
 import re

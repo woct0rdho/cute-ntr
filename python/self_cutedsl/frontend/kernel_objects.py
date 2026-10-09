@@ -1,4 +1,4 @@
-"""kernel_objects.py — device-side value objects created during tracing."""
+"""kernel_objects.py - device-side value objects created during tracing."""
 from __future__ import annotations
 
 from .emitter import SSA
@@ -97,7 +97,7 @@ class KernelTensor:
 
 
 class BlockTile:
-    """blkA = gA[((None,None), bidx)] — one CTA's tile with dynamic origin."""
+    """blkA = gA[((None,None), bidx)] - one CTA's tile with dynamic origin."""
 
     def __init__(self, base_ptr: SSA | None, tiled_meta, block_idx: SSA, is_coord=False):
         self.base_ptr = base_ptr        # None for coordinate tensors
@@ -171,14 +171,19 @@ class Fragment:
         return self.elem
 
     def fill(self, value):
-        """accumulators.fill(0.0) — all slots to a constant."""
-        if float(value) != 0.0:
-            raise NotImplementedError("Fragment.fill(nonzero)")
+        """accumulators.fill(0.0) - all slots to a constant."""
         from .builtins import _emitter
 
         e = _emitter()
+        if hasattr(value, "ssa"):
+            value = value.ssa
         for i in range(self.count):
-            self.slots[i] = e.ssa("f32", "arith.constant 0.0 : f32")
+            if isinstance(value, (int, float)):
+                literal = f"{float(value):.10e}".replace("+", "")
+                self.slots[i] = e.ssa(
+                    "f32", f"arith.constant {literal} : f32")
+            else:
+                self.slots[i] = value
 
     def reduce(self, op, init_val=None, reduction_profile=0):
         """Fold per-element values with op into one f32 SSA (init_val is a
@@ -220,9 +225,9 @@ class Fragment:
 class _FragSlice:
     """View retaining leading fragment modes while fixing trailing modes.
 
-    CuTe's ``frag[(None, m, n)]`` keeps the value mode and selects one MMA
+    CuTe's `frag[(None, m, n)]` keeps the value mode and selects one MMA
     atom.  Fragment slots are stored atom-major with the retained values
-    contiguous, so the selected atom starts at ``linear(m, n) * values``.
+    contiguous, so the selected atom starts at `linear(m, n) * values`.
     """
 
     def __init__(self, holder, base: int, shape):
@@ -368,7 +373,7 @@ def _row_major_of(shape):
 
 
 class _IterPtr:
-    """tensor.iterator + offset — official pointer arithmetic; carries
+    """tensor.iterator + offset - official pointer arithmetic; carries
     .llvm_ptr (raw SSA) for inline-asm address computation."""
 
     def __init__(self, ptr, kt):

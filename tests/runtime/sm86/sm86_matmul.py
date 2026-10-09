@@ -2,8 +2,8 @@
 
 The application kernel deliberately uses the original CuTe ownership model:
 layouts and tiled operations are built by the host JIT, CTA tiles come from
-``local_tile``, and all memory/MMA ownership is obtained through ``get_slice``
-and ``partition_*``.  The compatibility backend still lowers these objects to
+`local_tile`, and all memory/MMA ownership is obtained through `get_slice`
+and `partition_*`.  The compatibility backend still lowers these objects to
 the validated Ampere cp.async, ldmatrix, and mma.sync instruction sequence.
 """
 import cutlass
@@ -185,7 +185,7 @@ def sm86_matmul(
     tiled_mma = cute.make_tiled_mma(
         mma, atom_layout,
         # The compatibility tiled-MMA backend models the per-warp tile in
-        # ``tile_mn`` and derives the warp grid from atom_layout.  Keep the
+        # `tile_mn` and derives the warp grid from atom_layout.  Keep the
         # canonical CuTe permutation explicit: each warp owns 32x32 while
         # (WARP_M, warps_n) warps cover the CTA tile.
         permutation_mnk=(WARP_M * 16, 32, 16))
@@ -213,8 +213,12 @@ def sm86_matmul(
             grid=grid, block=[block_threads, 1, 1])
 
 
-def compile_sm86_matmul(a, b, c):
-    """Compile and return a callable using the official target option."""
+def compile_sm86_matmul(a, b, c, options="--gpu-arch sm86"):
+    """Compile and return a callable using the official target option.
+
+    `options` is the full official CuTeDSL compile-option string; artifact
+    inspection callers append the official dump flags to it.
+    """
     M, K = a.shape
     _, N = b.shape
     assert a.is_cuda and b.is_cuda and c.is_cuda
@@ -226,7 +230,7 @@ def compile_sm86_matmul(a, b, c):
         sm86_matmul,
         from_dlpack(a), from_dlpack(b), from_dlpack(c),
         K // k_tile, K, N, M, a.stride(0), b.stride(0),
-        tile_n, warps_n, options="--gpu-arch sm86",
+        tile_n, warps_n, options=options,
     )
 
 

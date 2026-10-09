@@ -1,4 +1,4 @@
-"""cutlass — CuTeDSL-Fully-OpenSourced compatibility namespace.
+"""cutlass - CuTeDSL-Fully-OpenSourced compatibility namespace.
 
 API-compatible surface for the proprietary `nvidia-cutlass-dsl` `cutlass`
 package, implemented entirely by the open self stack. Programs written for
@@ -38,7 +38,7 @@ __version__ = "0.1.0+compat"
 
 
 def range_constexpr(*args, **kw):
-    """cutlass.range_constexpr(n) — trace-time unrolled range."""
+    """cutlass.range_constexpr(n) - trace-time unrolled range."""
     return range(*args, **kw)
 
 
@@ -53,12 +53,12 @@ def range_dynamic(*args, **kw):
 
 
 def const_expr(cond):
-    """cutlass.const_expr(cond) — trace-time conditional; the condition is
+    """cutlass.const_expr(cond) - trace-time conditional; the condition is
     a python bool at trace time (official partial evaluation)."""
     return bool(cond)
 
 
 def range(n, *rest, **kw):
-    """cutlass.range — host trace loop; plain builtin semantics."""
+    """cutlass.range - host trace loop; plain builtin semantics."""
     return __builtins__["range"](n, *rest) if isinstance(__builtins__, dict) \
         else __builtins__.range(n, *rest)
